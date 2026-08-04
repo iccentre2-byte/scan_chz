@@ -124,7 +124,7 @@ class MainActivity : AppCompatActivity() {
 
             if (currentChildrenCodes.size >= targetCount) {
                 completedSets.add(SetUnit(currentSetCode!!, ArrayList(currentChildrenCodes)))
-                log("✅ Набор [${currentSetCode!!}] успешно заполнен и закрыт!")
+                log("✅ Набор [\${currentSetCode!!}] успешно заполнен и закрыт!")
                 Toast.makeText(this, "Набор закрыт! Жду следующий набор.", Toast.LENGTH_SHORT).show()
                 
                 currentSetCode = null
@@ -220,7 +220,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun log(message: String) {
         val currentText = binding.tvLog.text.toString()
-        binding.tvLog.text = "$message
-$currentText"
+        binding.tvLog.text = "$message\n$currentText"
     }
 }
