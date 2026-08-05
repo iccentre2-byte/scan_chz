@@ -79,15 +79,25 @@ class MainActivity : AppCompatActivity() {
     private val currentChildrenCodes = mutableListOf<String>()
     private val completedSets = mutableListOf<SetUnit>()
 
-    // Broadcast Receiver для приема сосканированных штрихкодов
+    // Расширенный перехватчик Интента com.android.server.scannerservice.broadcast
     private val scannerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            val barcode = intent?.getStringExtra("m3scannerdata")
-                ?: intent?.getStringExtra("data")
-                ?: intent?.getStringExtra("scan_data")
-                ?: intent?.getStringExtra("barcode_string")
-                
-            barcode?.trim()?.let { processScannedBarcode(it) }
+            if (intent == null) return
+
+            // Проверяем все возможные ключи, куда M3 Scanner Service кладет сосканированный штрихкод
+            val barcode = intent.getStringExtra("m3scannerdata")
+                ?: intent.getStringExtra("scannerdata")
+                ?: intent.getStringExtra("barcode_string")
+                ?: intent.getStringExtra("data")
+                ?: intent.getStringExtra("scan_data")
+                ?: intent.getStringExtra("extra_barcode_data")
+                ?: intent.getByteArrayExtra("barcode")?.let { String(it) }
+
+            barcode?.trim()?.let { 
+                if (it.isNotEmpty()) {
+                    processScannedBarcode(it) 
+                }
+            }
         }
     }
 
@@ -106,10 +116,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Регистрируем точное имя Интента службы ТСД
         val filter = IntentFilter().apply {
+            addAction("com.android.server.scannerservice.broadcast")
             addAction("com.m3.scan.action.SCANNER_OUTPUT")
             addAction("android.intent.ACTION_DECODE_DATA")
-            addAction("com.android.server.scannerservice.broadcast")
             addAction("com.scan.output")
             addAction("com.tsd.czsetcollector.SCAN_ACTION")
         }
@@ -118,13 +129,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        setContinuousScanMode(false) // При сворачивании отключаем непрерывный режим
+        setContinuousScanMode(false)
         unregisterReceiver(scannerReceiver)
     }
 
-    /**
-     * Управление непрерывным режимом сканера M3 Mobile SL20
-     */
     private fun setContinuousScanMode(enable: Boolean) {
         val intent = Intent("com.m3.scan.action.SCANNER_SETTING_CHANGE").apply {
             putExtra("setting_name", "continuous_scan")
@@ -132,7 +140,6 @@ class MainActivity : AppCompatActivity() {
         }
         sendBroadcast(intent)
 
-        // Дополнительный стандартный интент управления считывателем M3
         val directIntent = Intent("com.m3.scan.action.CONTINUOUS_SCAN").apply {
             putExtra("enable", enable)
         }
@@ -255,15 +262,13 @@ class MainActivity : AppCompatActivity() {
         val targetCount = binding.etCountPerSet.text.toString().toIntOrNull() ?: 6
 
         if (currentSetCode == null) {
-            // 1. Сканирование НАБОРА -> Открываем набор и ВКЛЮЧАЕМ НЕПРЕРЫВНЫЙ РЕЖИМ
             currentSetCode = barcode
             currentChildrenCodes.clear()
             
-            setContinuousScanMode(true) // Включаем потоковое сканирование
+            setContinuousScanMode(true)
             log("-> Принят НАБОР: $barcode (ВКЛЮЧЕН НЕПРЕРЫВНЫЙ СКАНЕР)")
             Toast.makeText(this, "Набор открыт! Сканируйте пачки подряд", Toast.LENGTH_SHORT).show()
         } else {
-            // 2. Сканирование Пачек внутри Набора
             if (currentChildrenCodes.contains(barcode)) {
                 log("⚠️ Ошибка: Этот DataMatrix пачки уже сканировали!")
                 Toast.makeText(this, "Дубликат пачки!", Toast.LENGTH_SHORT).show()
@@ -278,11 +283,10 @@ class MainActivity : AppCompatActivity() {
             currentChildrenCodes.add(barcode)
             log("-> Пачка (${currentChildrenCodes.size}/$targetCount): $barcode")
 
-            // 3. Набор заполнился -> Автозакрытие и ВЫКЛЮЧЕНИЕ НЕПРЕРЫВНОГО РЕЖИМА
             if (currentChildrenCodes.size >= targetCount) {
                 completedSets.add(SetUnit(currentSetCode!!, ArrayList(currentChildrenCodes)))
                 
-                setContinuousScanMode(false) // Гасим лазер/сканер
+                setContinuousScanMode(false)
                 log("✅ Набор [${currentSetCode!!}] ЗАКРЫТ. Сканер выключен. Отсканируйте следующий НАБОР.")
                 Toast.makeText(this, "Набор закрыт! Отсканируйте следующий НАБОР.", Toast.LENGTH_SHORT).show()
                 
