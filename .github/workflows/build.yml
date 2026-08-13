@@ -2,34 +2,36 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ "main", "master" ]
-  workflow_dispatch:
+    branches: [ "main" ]
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
     - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
         java-version: '17'
         distribution: 'temurin'
+        cache: gradle
 
-    - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@v3
-      with:
-        gradle-version: '8.2'
-        cache-disabled: true
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
 
     - name: Build Standalone APK
-      run: gradle assembleDebug -Pandroid.injected.testOnly=false
+      run: ./gradlew assembleDebug
 
-    - name: Upload APK Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: tsd-app-v1.0.1
-        path: app/build/outputs/apk/debug/app-debug.apk
+    - name: Auto-update app-release.apk in repo root
+      run: |
+        cp app/build/outputs/apk/debug/app-debug.apk app-release.apk
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add app-release.apk
+        git commit -m "Auto-update app-release.apk [skip ci]" || echo "No changes to commit"
+        git push
