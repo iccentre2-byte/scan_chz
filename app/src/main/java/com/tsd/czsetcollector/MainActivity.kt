@@ -22,7 +22,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
-import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -63,7 +62,10 @@ data class CzApiResponse(
 )
 
 interface CzApiService {
-    @Headers("Content-Type: application/json;charset=UTF-8")
+    @Headers(
+        "Content-Type: application/json;charset=UTF-8",
+        "Accept: application/json"
+    )
     @POST("api/v2/true-api/lk/documents/create")
     suspend fun sendSetDraft(
         @Header("Authorization") token: String,
@@ -372,8 +374,8 @@ class MainActivity : AppCompatActivity() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val okHttpClient = OkHttpClient.Builder()
-                    .followRedirects(true)
-                    .followSslRedirects(true)
+                    .followRedirects(false)
+                    .followSslRedirects(false)
                     .build()
 
                 val retrofit = Retrofit.Builder()
