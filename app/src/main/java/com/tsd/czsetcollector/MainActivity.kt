@@ -79,12 +79,10 @@ class MainActivity : AppCompatActivity() {
     private val currentChildrenCodes = mutableListOf<String>()
     private val completedSets = mutableListOf<SetUnit>()
 
-    // Расширенный перехватчик Интента com.android.server.scannerservice.broadcast
     private val scannerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent == null) return
 
-            // Проверяем все возможные ключи, куда M3 Scanner Service кладет сосканированный штрихкод
             val barcode = intent.getStringExtra("m3scannerdata")
                 ?: intent.getStringExtra("scannerdata")
                 ?: intent.getStringExtra("barcode_string")
@@ -116,7 +114,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Регистрируем точное имя Интента службы ТСД
         val filter = IntentFilter().apply {
             addAction("com.android.server.scannerservice.broadcast")
             addAction("com.m3.scan.action.SCANNER_OUTPUT")
@@ -144,6 +141,32 @@ class MainActivity : AppCompatActivity() {
             putExtra("enable", enable)
         }
         sendBroadcast(directIntent)
+    }
+
+    /**
+     * Очистка DataMatrix от криптохвоста для API Честного ЗНАКа
+     */
+    private fun cleanCode(rawCode: String): String {
+        var code = rawCode.trim()
+        
+        // Удаляем стандартные префиксы сканера
+        if (code.startsWith("]d2") || code.startsWith("]e0")) {
+            code = code.substring(3)
+        }
+        
+        // Отсекаем криптохвост по символу GS (Group Separator)
+        val gsIndex = code.indexOf('\u001d')
+        if (gsIndex != -1) {
+            return code.substring(0, gsIndex)
+        }
+
+        // Если символ GS был вырезан сканером, отсекаем по ключу '91'
+        val key91Index = code.indexOf("91")
+        if (key91Index in 21..35) {
+            return code.substring(0, key91Index)
+        }
+
+        return code
     }
 
     private fun setupKeyAndTextListeners() {
@@ -257,7 +280,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun processScannedBarcode(barcode: String) {
+    private fun processScannedBarcode(rawBarcode: String) {
+        val barcode = cleanCode(rawBarcode)
         log("Сканирование: $barcode")
         val targetCount = binding.etCountPerSet.text.toString().toIntOrNull() ?: 6
 
