@@ -8,6 +8,7 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
+import android.text.method.ScrollingMovementMethod
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -70,7 +71,6 @@ class MainActivity : AppCompatActivity() {
     private val currentChildrenCodes = mutableListOf<String>()
     private val completedSets = mutableListOf<SetUnit>()
 
-    // Безопасный файл локального бэкапа без необходимости прав Android
     private val safeBackupFile: File
         get() = File(getExternalFilesDir(null) ?: filesDir, "cz_profiles_backup.json")
 
@@ -99,6 +99,9 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        // Включаем прокрутку лога пальцем
+        binding.tvLog.movementMethod = ScrollingMovementMethod()
+
         prefs = getSharedPreferences("cz_multi_profiles", Context.MODE_PRIVATE)
 
         loadProfilesFromStorage()
@@ -106,8 +109,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.0.4"
-        log("Запуск приложения v1.0.4")
+        binding.tvAppVersion.text = "v1.0.5"
+        log("Запуск приложения v1.0.5")
     }
 
     override fun onResume() {
@@ -397,7 +400,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         val jsonBody = gson.toJson(requestData)
-        log("🚀 [v1.0.4] Отправка в ЧЗ (${sendUnits.size} наборов)...")
+        log("🚀 [v1.0.5] Отправка в ЧЗ (${sendUnits.size} наборов)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -406,64 +409,29 @@ class MainActivity : AppCompatActivity() {
                     .followSslRedirects(false)
                     .build()
 
-                val targetUrls = listOf(
-                    "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?type=CREATE_SET",
-                    "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create/?type=CREATE_SET",
-                    "https://ismp.crpt.ru/api/v2/true-api/documents/create?type=CREATE_SET",
-                    "https://ismp.crpt.ru/api/v2/true-api/documents/create/?type=CREATE_SET"
-                )
+                val url = "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?type=CREATE_SET"
+                val mediaType = "application/json; charset=utf-8".toMediaType()
 
-                var isSuccess = false
-                var lastResponseCode = 0
-                var lastResponseBody = ""
+                log("📡 POST -> $url")
+                
+                val request = Request.Builder()
+                    .url(url)
+                    .post(jsonBody.toRequestBody(mediaType))
+                    .addHeader("Authorization", authHeader)
+                    .addHeader("Accept", "application/json")
+                    .addHeader("Content-Type", "application/json; charset=utf-8")
+                    .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                    .build()
 
-                for (url in targetUrls) {
-                    val mediaType = "application/json; charset=utf-8".toMediaType()
-                    var currentUrl = url
-                    var redirectCount = 0
+                val response = client.newCall(request).execute()
+                val responseCode = response.code
+                val responseBody = response.body?.string() ?: ""
 
-                    while (redirectCount < 3) {
-                        log("📡 POST -> $currentUrl")
-                        
-                        val request = Request.Builder()
-                            .url(currentUrl)
-                            .post(jsonBody.toRequestBody(mediaType))
-                            .addHeader("Authorization", authHeader)
-                            .addHeader("Accept", "application/json")
-                            .addHeader("Content-Type", "application/json; charset=utf-8")
-                            .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                            .build()
-
-                        val response = client.newCall(request).execute()
-                        lastResponseCode = response.code
-                        lastResponseBody = response.body?.string() ?: ""
-
-                        log("📩 Ответ [$lastResponseCode]")
-
-                        if (lastResponseCode in listOf(301, 302, 307, 308)) {
-                            val location = response.header("Location")
-                            if (!location.isNullOrEmpty()) {
-                                currentUrl = if (location.startsWith("http")) location else "https://ismp.crpt.ru$location"
-                                redirectCount++
-                                log("🔄 Nginx Редирект ($lastResponseCode) -> $currentUrl")
-                                continue
-                            }
-                        }
-
-                        if (response.isSuccessful) {
-                            isSuccess = true
-                        }
-                        break
-                    }
-
-                    if (isSuccess || lastResponseCode in listOf(200, 400, 401, 403, 422)) {
-                        break
-                    }
-                }
+                log("📩 Ответ [$responseCode]")
 
                 withContext(Dispatchers.Main) {
-                    if (isSuccess) {
-                        val apiResp = try { gson.fromJson(lastResponseBody, CzApiResponse::class.java) } catch (e: Exception) { null }
+                    if (response.isSuccessful) {
+                        val apiResp = try { gson.fromJson(responseBody, CzApiResponse::class.java) } catch (e: Exception) { null }
                         log("✅ УСПЕХ! Черновик создан в ЧЗ.")
                         log("ID Документа: ${apiResp?.documentId ?: "Принят"}")
                         Toast.makeText(this@MainActivity, "Черновик отправлен в ЧЗ!", Toast.LENGTH_LONG).show()
@@ -472,9 +440,12 @@ class MainActivity : AppCompatActivity() {
                         currentSetCode = null
                         currentChildrenCodes.clear()
                         updateUi()
+                    } else if (responseCode in listOf(301, 302, 307, 308)) {
+                        log("❌ ОШИБКА АВТОРИЗАЦИИ ЧЗ [$responseCode]: Токен (Token) недействителен или истёк. Скопируйте свежий Bearer Token из ЛК Честного ЗНАКа!")
+                        Toast.makeText(this@MainActivity, "Ошибка: Токен истёк!", Toast.LENGTH_LONG).show()
                     } else {
-                        log("❌ ОШИБКА ЧЗ [$lastResponseCode]: $lastResponseBody")
-                        Toast.makeText(this@MainActivity, "Ошибка ответа ЧЗ: $lastResponseCode", Toast.LENGTH_LONG).show()
+                        log("❌ ОШИБКА ЧЗ [$responseCode]: $responseBody")
+                        Toast.makeText(this@MainActivity, "Ошибка ответа ЧЗ: $responseCode", Toast.LENGTH_LONG).show()
                     }
                 }
             } catch (e: Exception) {
@@ -489,5 +460,6 @@ class MainActivity : AppCompatActivity() {
     private fun log(message: String) {
         val currentText = binding.tvLog.text.toString()
         binding.tvLog.text = "$message\n$currentText"
+        binding.tvLog.scrollTo(0, 0)
     }
 }
