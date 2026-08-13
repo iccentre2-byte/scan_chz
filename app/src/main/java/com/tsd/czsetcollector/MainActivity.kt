@@ -55,7 +55,7 @@ data class SetUnit(
 )
 
 data class ProductDocumentSet(
-    @SerializedName("action_id") val actionId: Int = 20,
+    @SerializedName("action_id") val actionId: Int = 30,
     @SerializedName("version") val version: Int = 1,
     @SerializedName("inn") val inn: String,
     @SerializedName("set_units") val setUnits: List<SetUnit>
@@ -68,7 +68,8 @@ data class SetDocumentRequest(
 
 data class CzApiResponse(
     @SerializedName("number") val documentId: String?,
-    @SerializedName("error_message") val errorMessage: String?
+    @SerializedName("error_message") val errorMessage: String?,
+    @SerializedName("code") val code: String?
 )
 
 class MainActivity : AppCompatActivity() {
@@ -161,8 +162,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.1.3"
-        log("Запуск v1.1.3")
+        binding.tvAppVersion.text = "v1.1.4"
+        log("Запуск v1.1.4")
     }
 
     override fun onResume() {
@@ -565,7 +566,6 @@ class MainActivity : AppCompatActivity() {
 
         val authHeader = if (rawToken.startsWith("Bearer ")) rawToken else "Bearer $rawToken"
 
-        // Если табак — отправляем CREATE_SET (action_id 20), если бакалея/соусы — универсальная агрегация (action_id 30)
         val actionId = if (pg == "tobacco" || pg == "otp") 20 else 30
         val docType = if (pg == "tobacco" || pg == "otp") "CREATE_SET" else "AGGREGATION_DOCUMENT"
 
@@ -584,17 +584,17 @@ class MainActivity : AppCompatActivity() {
         )
 
         val jsonBody = gson.toJson(requestData)
-        log("🚀 [v1.1.3] Отправка в ЧЗ ($docType, pg=$pg, ${sendUnits.size} шт)...")
+        log("🚀 [v1.1.4] Отправка в ЧЗ (pg=$pg, ${sendUnits.size} шт)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val client = OkHttpClient.Builder().build()
 
-                val url = "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?pg=$pg&type=$docType"
+                // Прямой эндпоинт отправки продуктовых документов ГИС МТ
+                val url = "https://ismp.crpt.ru/api/v2/true-api/documents/create?pg=$pg"
                 val mediaType = "application/json; charset=utf-8".toMediaType()
 
                 log("📡 REQ: POST $url")
-                log("🔑 AUTH: ${authHeader.take(15)}...")
 
                 val request = Request.Builder()
                     .url(url)
@@ -613,7 +613,7 @@ class MainActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) {
                     if (response.isSuccessful) {
                         val apiResp = try { gson.fromJson(responseBody, CzApiResponse::class.java) } catch (e: Exception) { null }
-                        log("✅ УСПЕХ! Документ создан в ЧЗ.")
+                        log("✅ УСПЕХ! Черновик создан в ЧЗ.")
                         log("ID: ${apiResp?.documentId ?: "Принят"}")
                         Toast.makeText(this@MainActivity, "Черновик создался в ЧЗ!", Toast.LENGTH_LONG).show()
 
@@ -640,7 +640,6 @@ class MainActivity : AppCompatActivity() {
         val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         val entry = "[$timestamp] $message\n"
         
-        // Синхронная гарантированная запись на диск
         try {
             logFile.appendText(entry)
         } catch (e: Exception) {}
