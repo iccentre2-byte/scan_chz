@@ -261,6 +261,20 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Обработчик кнопки сброса незавершенного набора
+        binding.btnResetCurrentSet.setOnClickListener {
+            if (currentSetCode != null) {
+                currentSetCode = null
+                currentChildrenCodes.clear()
+                setContinuousScanMode(false)
+                updateUi()
+                log("⚠️ Текущий незавершенный набор сброшен пользователем.")
+                Toast.makeText(this, "Набор сброшен. Отсканируйте новый НАБОР.", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Нет открытого набора для сброса", Toast.LENGTH_SHORT).show()
+            }
+        }
+
         binding.btnSendDraft.setOnClickListener {
             setContinuousScanMode(false)
             sendDraftToChestnyZnak()
@@ -394,7 +408,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     if (lastResponseCode != 405) {
-                        break // Если сервер вернул отклик API (например, 200, 400, 401), прерываем
+                        break
                     }
                 }
 
