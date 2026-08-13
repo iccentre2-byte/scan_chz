@@ -21,7 +21,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -60,19 +63,6 @@ data class CzApiResponse(
     @SerializedName("number") val documentId: String?,
     @SerializedName("error_message") val errorMessage: String?
 )
-
-interface CzApiService {
-    @Headers(
-        "Content-Type: application/json;charset=UTF-8",
-        "Accept: application/json"
-    )
-    @POST("api/v2/true-api/lk/documents/create")
-    suspend fun sendSetDraft(
-        @Header("Authorization") token: String,
-        @Query("type") type: String = "CREATE_SET",
-        @Body request: SetDocumentRequest
-    ): Response<CzApiResponse>
-}
 
 class MainActivity : AppCompatActivity() {
 
@@ -118,6 +108,8 @@ class MainActivity : AppCompatActivity() {
         setupListeners()
         setupKeyAndTextListeners()
         updateUi()
+
+        log("Запуск приложения v1.0.1 (build 2)")
     }
 
     override fun onResume() {
@@ -362,36 +354,62 @@ class MainActivity : AppCompatActivity() {
 
         val authHeader = if (rawToken.startsWith("Bearer ")) rawToken else "Bearer $rawToken"
 
-        val request = SetDocumentRequest(
+        val requestData = SetDocumentRequest(
             productDocument = ProductDocumentSet(
                 inn = inn,
                 setUnits = sendUnits
             )
         )
 
-        log("🚀 Отправка черновика в ЧЗ (${sendUnits.size} наборов)...")
+        val jsonBody = gson.toJson(requestData)
+        log("🚀 [v1.0.1] Отправка черновика в ЧЗ (${sendUnits.size} наборов)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val okHttpClient = OkHttpClient.Builder()
+                val client = OkHttpClient.Builder()
                     .followRedirects(false)
                     .followSslRedirects(false)
                     .build()
 
-                val retrofit = Retrofit.Builder()
-                    .baseUrl("https://markirovka.crpt.ru/")
-                    .client(okHttpClient)
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .build()
+                // Варианты адресов для обхода перенаправлений Nginx ЧЗ
+                val targetUrls = listOf(
+                    "https://markirovka.crpt.ru/api/v2/true-api/lk/documents/create?type=CREATE_SET",
+                    "https://markirovka.crpt.ru/api/v2/true-api/documents/create?type=CREATE_SET",
+                    "https://markirovka.crpt.ru/api/v2/true-api/lk/documents/create/?type=CREATE_SET"
+                )
 
-                val api = retrofit.create(CzApiService::class.java)
-                val response = api.sendSetDraft(token = authHeader, request = request)
+                var isSuccess = false
+                var lastResponseCode = 0
+                var lastResponseBody = ""
+
+                for (url in targetUrls) {
+                    val request = Request.Builder()
+                        .url(url)
+                        .post(jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                        .addHeader("Authorization", authHeader)
+                        .addHeader("Accept", "application/json")
+                        .addHeader("User-Agent", "Mozilla/5.0 (Android; Mobile TSD App)")
+                        .build()
+
+                    val response = client.newCall(request).execute()
+                    lastResponseCode = response.code
+                    lastResponseBody = response.body?.string() ?: ""
+
+                    if (response.isSuccessful) {
+                        isSuccess = true
+                        break
+                    }
+
+                    if (lastResponseCode != 405) {
+                        break // Если ошибка не 405, прерываем цикл перебора
+                    }
+                }
 
                 withContext(Dispatchers.Main) {
-                    if (response.isSuccessful) {
-                        val body = response.body()
-                        log("✅ УСПЕХ! Черновик 'Сформировать набор' создан в ЧЗ.")
-                        log("ID Документа: ${body?.documentId ?: "Принят"}")
+                    if (isSuccess) {
+                        val apiResp = try { gson.fromJson(lastResponseBody, CzApiResponse::class.java) } catch (e: Exception) { null }
+                        log("✅ УСПЕХ! Черновик создан в ЧЗ.")
+                        log("ID Документа: ${apiResp?.documentId ?: "Принят"}")
                         Toast.makeText(this@MainActivity, "Черновик наборов отправлен в ЧЗ!", Toast.LENGTH_LONG).show()
 
                         completedSets.clear()
@@ -399,9 +417,8 @@ class MainActivity : AppCompatActivity() {
                         currentChildrenCodes.clear()
                         updateUi()
                     } else {
-                        val err = response.errorBody()?.string() ?: response.message()
-                        log("❌ ОШИБКА ЧЗ [${response.code()}]: $err")
-                        Toast.makeText(this@MainActivity, "Ошибка отправки в ЧЗ", Toast.LENGTH_LONG).show()
+                        log("❌ ОШИБКА ЧЗ [$lastResponseCode]: $lastResponseBody")
+                        Toast.makeText(this@MainActivity, "Ошибка ответа ЧЗ: $lastResponseCode", Toast.LENGTH_LONG).show()
                     }
                 }
             } catch (e: Exception) {
