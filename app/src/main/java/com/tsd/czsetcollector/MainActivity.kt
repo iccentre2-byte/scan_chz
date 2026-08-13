@@ -71,7 +71,6 @@ class MainActivity : AppCompatActivity() {
     private val currentChildrenCodes = mutableListOf<String>()
     private val completedSets = mutableListOf<SetUnit>()
 
-    // Файл для вечного хранения профилей на ТСД
     private val externalBackupFile: File
         get() {
             val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
@@ -111,8 +110,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.0.2"
-        log("Запуск приложения v1.0.2")
+        binding.tvAppVersion.text = "v1.0.3"
+        log("Запуск приложения v1.0.3")
     }
 
     override fun onResume() {
@@ -188,18 +187,16 @@ class MainActivity : AppCompatActivity() {
         profilesList.clear()
         var loadedJson: String? = null
 
-        // 1. Сначала пробуем загрузить из вечного внешнего бэкапа
         try {
             val file = externalBackupFile
             if (file.exists()) {
                 loadedJson = file.readText()
-                log("📦 Профили загружены из бэкапа ТСД")
+                log("📦 Профили подтянуты из бэкапа")
             }
         } catch (e: Exception) {
-            log("⚠️ Не удалось прочесть бэкап: ${e.message}")
+            log("⚠️ Ошибка бэкапа: ${e.message}")
         }
 
-        // 2. Если во внешнем файле сухо, берем из внутренних SharedPreferences
         if (loadedJson.isNullOrEmpty()) {
             loadedJson = prefs.getString("profiles_json", null)
         }
@@ -210,7 +207,7 @@ class MainActivity : AppCompatActivity() {
                 val savedList: List<OrganizationProfile> = gson.fromJson(loadedJson, type)
                 profilesList.addAll(savedList)
             } catch (e: Exception) {
-                log("⚠️ Ошибка разбора JSON профилей")
+                log("⚠️ Ошибка JSON")
             }
         }
 
@@ -223,17 +220,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveProfilesToStorage() {
         val json = gson.toJson(profilesList)
-
-        // Сохраняем во внутреннее хранилище
         prefs.edit().putString("profiles_json", json).apply()
 
-        // Дублируем во внешний файл для сохранности при переустановках
         try {
             val file = externalBackupFile
             file.writeText(json)
-            log("💾 Профили зафиксированы во внешнем бэкапе")
+            log("💾 Бэкап профиля сохранен")
         } catch (e: Exception) {
-            log("⚠️ Не удалось сохранить бэкап: ${e.message}")
+            log("⚠️ Ошибка записи бэкапа: ${e.message}")
         }
     }
 
@@ -308,8 +302,8 @@ class MainActivity : AppCompatActivity() {
                 currentChildrenCodes.clear()
                 setContinuousScanMode(false)
                 updateUi()
-                log("⚠️ Текущий незавершенный набор сброшен пользователем.")
-                Toast.makeText(this, "Набор сброшен. Отсканируйте новый НАБОР.", Toast.LENGTH_SHORT).show()
+                log("⚠️ Открытый набор сброшен пользователем.")
+                Toast.makeText(this, "Набор сброшен.", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(this, "Нет открытого набора для сброса", Toast.LENGTH_SHORT).show()
             }
@@ -331,17 +325,17 @@ class MainActivity : AppCompatActivity() {
             currentChildrenCodes.clear()
             
             setContinuousScanMode(true)
-            log("-> Принят НАБОР: $barcode (ВКЛЮЧЕН НЕПРЕРЫВНЫЙ СКАНЕР)")
-            Toast.makeText(this, "Набор открыт! Сканируйте пачки подряд", Toast.LENGTH_SHORT).show()
+            log("-> Принят НАБОР: $barcode (НЕПРЕРЫВНЫЙ СКАНЕР ВКЛ)")
+            Toast.makeText(this, "Набор открыт!", Toast.LENGTH_SHORT).show()
         } else {
             if (currentChildrenCodes.contains(barcode)) {
-                log("⚠️ Ошибка: Этот DataMatrix пачки уже сканировали!")
+                log("⚠️ Ошибка: Дубликат пачки!")
                 Toast.makeText(this, "Дубликат пачки!", Toast.LENGTH_SHORT).show()
                 return
             }
 
             if (barcode == currentSetCode) {
-                log("⚠️ Ошибка: Сосканирован код самого Набора вместо пачки!")
+                log("⚠️ Ошибка: Сосканирован код Набора вместо пачки!")
                 return
             }
 
@@ -352,8 +346,8 @@ class MainActivity : AppCompatActivity() {
                 completedSets.add(SetUnit(currentSetCode!!, ArrayList(currentChildrenCodes)))
                 
                 setContinuousScanMode(false)
-                log("✅ Набор [${currentSetCode!!}] ЗАКРЫТ. Сканер выключен. Отсканируйте следующий НАБОР.")
-                Toast.makeText(this, "Набор закрыт! Отсканируйте следующий НАБОР.", Toast.LENGTH_SHORT).show()
+                log("✅ Набор [${currentSetCode!!}] ЗАКРЫТ.")
+                Toast.makeText(this, "Набор закрыт!", Toast.LENGTH_SHORT).show()
                 
                 currentSetCode = null
                 currentChildrenCodes.clear()
@@ -371,7 +365,7 @@ class MainActivity : AppCompatActivity() {
             binding.tvCurrentSet.text = "Текущий набор: НЕ ВЫБРАН"
             binding.tvProgress.text = "Пачек в наборе: 0 / $targetCount"
         } else {
-            binding.tvScanState.text = "СТАТУС: Потоковый режим (Сканируйте $targetCount пачек)"
+            binding.tvScanState.text = "СТАТУС: Потоковый режим ($targetCount пачек)"
             binding.tvScanState.setBackgroundColor(0xFFFEF3C7.toInt())
             binding.tvCurrentSet.text = "Текущий набор: $currentSetCode"
             binding.tvProgress.text = "Пачек в наборе: ${currentChildrenCodes.size} / $targetCount"
@@ -409,19 +403,22 @@ class MainActivity : AppCompatActivity() {
         )
 
         val jsonBody = gson.toJson(requestData)
-        log("🚀 [v1.0.2] Отправка черновика в ЧЗ (${sendUnits.size} наборов)...")
+        log("🚀 [v1.0.3] Отправка в ЧЗ (${sendUnits.size} наборов)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                // Выключаем автоматический редирект, чтобы перехватить 301/302 ручным POST
                 val client = OkHttpClient.Builder()
                     .followRedirects(false)
                     .followSslRedirects(false)
                     .build()
 
+                // Список целевых эндпоинтов со слэшами на конце (предотвращает Nginx 301)
                 val targetUrls = listOf(
                     "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?type=CREATE_SET",
+                    "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create/?type=CREATE_SET",
                     "https://ismp.crpt.ru/api/v2/true-api/documents/create?type=CREATE_SET",
-                    "https://markirovka.crpt.ru/api/v2/true-api/lk/documents/create?type=CREATE_SET"
+                    "https://ismp.crpt.ru/api/v2/true-api/documents/create/?type=CREATE_SET"
                 )
 
                 var isSuccess = false
@@ -429,24 +426,46 @@ class MainActivity : AppCompatActivity() {
                 var lastResponseBody = ""
 
                 for (url in targetUrls) {
-                    val request = Request.Builder()
-                        .url(url)
-                        .post(jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
-                        .addHeader("Authorization", authHeader)
-                        .addHeader("Accept", "application/json")
-                        .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                        .build()
+                    val mediaType = "application/json; charset=utf-8".toMediaType()
+                    var currentUrl = url
+                    var redirectCount = 0
 
-                    val response = client.newCall(request).execute()
-                    lastResponseCode = response.code
-                    lastResponseBody = response.body?.string() ?: ""
+                    while (redirectCount < 3) {
+                        log("📡 POST -> $currentUrl")
+                        
+                        val request = Request.Builder()
+                            .url(currentUrl)
+                            .post(jsonBody.toRequestBody(mediaType))
+                            .addHeader("Authorization", authHeader)
+                            .addHeader("Accept", "application/json")
+                            .addHeader("Content-Type", "application/json; charset=utf-8")
+                            .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                            .build()
 
-                    if (response.isSuccessful) {
-                        isSuccess = true
+                        val response = client.newCall(request).execute()
+                        lastResponseCode = response.code
+                        lastResponseBody = response.body?.string() ?: ""
+
+                        log("📩 Ответ [$lastResponseCode]")
+
+                        // Если сервер просит перенаправление (301, 302, 307, 308) — забираем новый URL и повторно бьем POST
+                        if (lastResponseCode in listOf(301, 302, 307, 308)) {
+                            val location = response.header("Location")
+                            if (!location.isNullOrEmpty()) {
+                                currentUrl = if (location.startsWith("http")) location else "https://ismp.crpt.ru$location"
+                                redirectCount++
+                                log("🔄 Nginx Редирект ($lastResponseCode) -> $currentUrl")
+                                continue
+                            }
+                        }
+
+                        if (response.isSuccessful) {
+                            isSuccess = true
+                        }
                         break
                     }
 
-                    if (lastResponseCode != 405) {
+                    if (isSuccess || lastResponseCode in listOf(200, 400, 401, 403, 422)) {
                         break
                     }
                 }
@@ -456,7 +475,7 @@ class MainActivity : AppCompatActivity() {
                         val apiResp = try { gson.fromJson(lastResponseBody, CzApiResponse::class.java) } catch (e: Exception) { null }
                         log("✅ УСПЕХ! Черновик создан в ЧЗ.")
                         log("ID Документа: ${apiResp?.documentId ?: "Принят"}")
-                        Toast.makeText(this@MainActivity, "Черновик наборов отправлен в ЧЗ!", Toast.LENGTH_LONG).show()
+                        Toast.makeText(this@MainActivity, "Черновик отправлен в ЧЗ!", Toast.LENGTH_LONG).show()
 
                         completedSets.clear()
                         currentSetCode = null
