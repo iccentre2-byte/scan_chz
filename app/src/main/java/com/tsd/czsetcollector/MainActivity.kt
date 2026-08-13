@@ -21,6 +21,7 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -166,20 +167,26 @@ class MainActivity : AppCompatActivity() {
             addAction("com.scan.output")
             addAction("com.tsd.czsetcollector.SCAN_ACTION")
         }
-        registerReceiver(scannerReceiver, scannerFilter)
+        ContextCompat.registerReceiver(
+            this,
+            scannerReceiver,
+            scannerFilter,
+            ContextCompat.RECEIVER_EXPORTED
+        )
 
         val downloadFilter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(downloadReceiver, downloadFilter, Context.RECEIVER_EXPORTED)
-        } else {
-            registerReceiver(downloadReceiver, downloadFilter)
-        }
+        ContextCompat.registerReceiver(
+            this,
+            downloadReceiver,
+            downloadFilter,
+            ContextCompat.RECEIVER_EXPORTED
+        )
     }
 
     override fun onPause() {
         super.onPause()
         setContinuousScanMode(false)
-        unregisterReceiver(scannerReceiver)
+        try { unregisterReceiver(scannerReceiver) } catch (e: Exception) {}
         try { unregisterReceiver(downloadReceiver) } catch (e: Exception) {}
     }
 
