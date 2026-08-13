@@ -21,12 +21,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.Header
+import retrofit2.http.Headers
 import retrofit2.http.POST
+import retrofit2.http.Query
 
 data class OrganizationProfile(
     val inn: String,
@@ -59,9 +63,11 @@ data class CzApiResponse(
 )
 
 interface CzApiService {
-    @POST("api/v2/true-api/lk/documents/create?type=CREATE_SET")
+    @Headers("Content-Type: application/json;charset=UTF-8")
+    @POST("api/v2/true-api/lk/documents/create")
     suspend fun sendSetDraft(
         @Header("Authorization") token: String,
+        @Query("type") type: String = "CREATE_SET",
         @Body request: SetDocumentRequest
     ): Response<CzApiResponse>
 }
@@ -143,24 +149,18 @@ class MainActivity : AppCompatActivity() {
         sendBroadcast(directIntent)
     }
 
-    /**
-     * Очистка DataMatrix от криптохвоста для API Честного ЗНАКа
-     */
     private fun cleanCode(rawCode: String): String {
         var code = rawCode.trim()
         
-        // Удаляем стандартные префиксы сканера
         if (code.startsWith("]d2") || code.startsWith("]e0")) {
             code = code.substring(3)
         }
         
-        // Отсекаем криптохвост по символу GS (Group Separator)
         val gsIndex = code.indexOf('\u001d')
         if (gsIndex != -1) {
             return code.substring(0, gsIndex)
         }
 
-        // Если символ GS был вырезан сканером, отсекаем по ключу '91'
         val key91Index = code.indexOf("91")
         if (key91Index in 21..35) {
             return code.substring(0, key91Index)
@@ -371,13 +371,19 @@ class MainActivity : AppCompatActivity() {
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                val okHttpClient = OkHttpClient.Builder()
+                    .followRedirects(true)
+                    .followSslRedirects(true)
+                    .build()
+
                 val retrofit = Retrofit.Builder()
                     .baseUrl("https://markirovka.crpt.ru/")
+                    .client(okHttpClient)
                     .addConverterFactory(GsonConverterFactory.create())
                     .build()
 
                 val api = retrofit.create(CzApiService::class.java)
-                val response = api.sendSetDraft(authHeader, request)
+                val response = api.sendSetDraft(token = authHeader, request = request)
 
                 withContext(Dispatchers.Main) {
                     if (response.isSuccessful) {
