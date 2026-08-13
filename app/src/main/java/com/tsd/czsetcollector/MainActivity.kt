@@ -6,7 +6,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.os.Bundle
-import android.os.Environment
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.View
@@ -71,12 +70,9 @@ class MainActivity : AppCompatActivity() {
     private val currentChildrenCodes = mutableListOf<String>()
     private val completedSets = mutableListOf<SetUnit>()
 
-    private val externalBackupFile: File
-        get() {
-            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            if (!dir.exists()) dir.mkdirs()
-            return File(dir, "cz_tsd_profiles_backup.json")
-        }
+    // Безопасный файл локального бэкапа без необходимости прав Android
+    private val safeBackupFile: File
+        get() = File(getExternalFilesDir(null) ?: filesDir, "cz_profiles_backup.json")
 
     private val scannerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -110,8 +106,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.0.3"
-        log("Запуск приложения v1.0.3")
+        binding.tvAppVersion.text = "v1.0.4"
+        log("Запуск приложения v1.0.4")
     }
 
     override fun onResume() {
@@ -185,20 +181,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadProfilesFromStorage() {
         profilesList.clear()
-        var loadedJson: String? = null
-
-        try {
-            val file = externalBackupFile
-            if (file.exists()) {
-                loadedJson = file.readText()
-                log("📦 Профили подтянуты из бэкапа")
-            }
-        } catch (e: Exception) {
-            log("⚠️ Ошибка бэкапа: ${e.message}")
-        }
+        var loadedJson: String? = prefs.getString("profiles_json", null)
 
         if (loadedJson.isNullOrEmpty()) {
-            loadedJson = prefs.getString("profiles_json", null)
+            try {
+                val file = safeBackupFile
+                if (file.exists()) {
+                    loadedJson = file.readText()
+                    log("📦 Профили подтянуты из резервного файла")
+                }
+            } catch (e: Exception) {
+                log("⚠️ Ошибка бэкапа: ${e.message}")
+            }
         }
 
         if (!loadedJson.isNullOrEmpty()) {
@@ -223,9 +217,9 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().putString("profiles_json", json).apply()
 
         try {
-            val file = externalBackupFile
+            val file = safeBackupFile
             file.writeText(json)
-            log("💾 Бэкап профиля сохранен")
+            log("💾 Профиль сохранен во внутреннем бэкапе")
         } catch (e: Exception) {
             log("⚠️ Ошибка записи бэкапа: ${e.message}")
         }
@@ -403,17 +397,15 @@ class MainActivity : AppCompatActivity() {
         )
 
         val jsonBody = gson.toJson(requestData)
-        log("🚀 [v1.0.3] Отправка в ЧЗ (${sendUnits.size} наборов)...")
+        log("🚀 [v1.0.4] Отправка в ЧЗ (${sendUnits.size} наборов)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                // Выключаем автоматический редирект, чтобы перехватить 301/302 ручным POST
                 val client = OkHttpClient.Builder()
                     .followRedirects(false)
                     .followSslRedirects(false)
                     .build()
 
-                // Список целевых эндпоинтов со слэшами на конце (предотвращает Nginx 301)
                 val targetUrls = listOf(
                     "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?type=CREATE_SET",
                     "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create/?type=CREATE_SET",
@@ -448,7 +440,6 @@ class MainActivity : AppCompatActivity() {
 
                         log("📩 Ответ [$lastResponseCode]")
 
-                        // Если сервер просит перенаправление (301, 302, 307, 308) — забираем новый URL и повторно бьем POST
                         if (lastResponseCode in listOf(301, 302, 307, 308)) {
                             val location = response.header("Location")
                             if (!location.isNullOrEmpty()) {
