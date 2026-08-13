@@ -88,6 +88,7 @@ class MainActivity : AppCompatActivity() {
         "Консервированная продукция (canned_products)",
         "Растительные масла (vegetable_oil)",
         "Кондитерские изделия (sweets)",
+        "Табачная продукция (tobacco)",
         "Свой код..."
     )
 
@@ -97,6 +98,7 @@ class MainActivity : AppCompatActivity() {
         "canned_products",
         "vegetable_oil",
         "sweets",
+        "tobacco",
         ""
     )
 
@@ -159,8 +161,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.1.2"
-        log("Запуск v1.1.2")
+        binding.tvAppVersion.text = "v1.1.3"
+        log("Запуск v1.1.3")
     }
 
     override fun onResume() {
@@ -447,7 +449,7 @@ class MainActivity : AppCompatActivity() {
                     installDownloadedApk()
                 } else if (status == DownloadManager.STATUS_FAILED) {
                     val reason = if (reasonIndex != -1) cursor.getInt(reasonIndex) else -1
-                    log("❌ Ошибка скачивания (код $reason). Загрузите файл app-release.apk в репозиторий!")
+                    log("❌ Ошибка скачивания (Код $reason)")
                     Toast.makeText(this, "Не удалось скачать APK (Код $reason)", Toast.LENGTH_LONG).show()
                 }
             }
@@ -563,7 +565,12 @@ class MainActivity : AppCompatActivity() {
 
         val authHeader = if (rawToken.startsWith("Bearer ")) rawToken else "Bearer $rawToken"
 
+        // Если табак — отправляем CREATE_SET (action_id 20), если бакалея/соусы — универсальная агрегация (action_id 30)
+        val actionId = if (pg == "tobacco" || pg == "otp") 20 else 30
+        val docType = if (pg == "tobacco" || pg == "otp") "CREATE_SET" else "AGGREGATION_DOCUMENT"
+
         val docStructure = ProductDocumentSet(
+            actionId = actionId,
             inn = inn,
             setUnits = sendUnits
         )
@@ -577,18 +584,17 @@ class MainActivity : AppCompatActivity() {
         )
 
         val jsonBody = gson.toJson(requestData)
-        log("🚀 [v1.1.2] Отправка в ЧЗ (pg=$pg, ${sendUnits.size} наборов)...")
+        log("🚀 [v1.1.3] Отправка в ЧЗ ($docType, pg=$pg, ${sendUnits.size} шт)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val client = OkHttpClient.Builder().build()
 
-                val url = "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?pg=$pg&type=CREATE_SET"
+                val url = "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?pg=$pg&type=$docType"
                 val mediaType = "application/json; charset=utf-8".toMediaType()
 
                 log("📡 REQ: POST $url")
                 log("🔑 AUTH: ${authHeader.take(15)}...")
-                log("📦 BODY: $jsonBody")
 
                 val request = Request.Builder()
                     .url(url)
@@ -607,8 +613,8 @@ class MainActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) {
                     if (response.isSuccessful) {
                         val apiResp = try { gson.fromJson(responseBody, CzApiResponse::class.java) } catch (e: Exception) { null }
-                        log("✅ УСПЕХ! Черновик 'Формирование набора' создан.")
-                        log("ID документа: ${apiResp?.documentId ?: "Принят"}")
+                        log("✅ УСПЕХ! Документ создан в ЧЗ.")
+                        log("ID: ${apiResp?.documentId ?: "Принят"}")
                         Toast.makeText(this@MainActivity, "Черновик создался в ЧЗ!", Toast.LENGTH_LONG).show()
 
                         completedSets.clear()
@@ -629,15 +635,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @Synchronized
     private fun log(message: String) {
         val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         val entry = "[$timestamp] $message\n"
         
-        val currentText = binding.tvLog.text.toString()
-        binding.tvLog.text = "$entry$currentText"
-
+        // Синхронная гарантированная запись на диск
         try {
             logFile.appendText(entry)
         } catch (e: Exception) {}
+
+        runOnUiThread {
+            val currentText = binding.tvLog.text.toString()
+            binding.tvLog.text = "$entry$currentText"
+        }
     }
 }
