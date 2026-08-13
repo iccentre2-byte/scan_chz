@@ -31,6 +31,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionSpec
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -39,6 +40,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 data class OrganizationProfile(
     val inn: String,
@@ -162,8 +164,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.1.4"
-        log("Запуск v1.1.4")
+        binding.tvAppVersion.text = "v1.1.5"
+        log("Запуск v1.1.5")
     }
 
     override fun onResume() {
@@ -567,7 +569,6 @@ class MainActivity : AppCompatActivity() {
         val authHeader = if (rawToken.startsWith("Bearer ")) rawToken else "Bearer $rawToken"
 
         val actionId = if (pg == "tobacco" || pg == "otp") 20 else 30
-        val docType = if (pg == "tobacco" || pg == "otp") "CREATE_SET" else "AGGREGATION_DOCUMENT"
 
         val docStructure = ProductDocumentSet(
             actionId = actionId,
@@ -584,13 +585,19 @@ class MainActivity : AppCompatActivity() {
         )
 
         val jsonBody = gson.toJson(requestData)
-        log("🚀 [v1.1.4] Отправка в ЧЗ (pg=$pg, ${sendUnits.size} шт)...")
+        log("🚀 [v1.1.5] Отправка в ЧЗ (pg=$pg, ${sendUnits.size} шт)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val client = OkHttpClient.Builder().build()
+                // Настроенный клиент с увеличенными таймаутами и поддержкой TLS
+                val client = OkHttpClient.Builder()
+                    .connectTimeout(30, TimeUnit.SECONDS)
+                    .readTimeout(30, TimeUnit.SECONDS)
+                    .writeTimeout(30, TimeUnit.SECONDS)
+                    .retryOnConnectionFailure(true)
+                    .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.CLEARTEXT))
+                    .build()
 
-                // Прямой эндпоинт отправки продуктовых документов ГИС МТ
                 val url = "https://ismp.crpt.ru/api/v2/true-api/documents/create?pg=$pg"
                 val mediaType = "application/json; charset=utf-8".toMediaType()
 
@@ -613,7 +620,7 @@ class MainActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) {
                     if (response.isSuccessful) {
                         val apiResp = try { gson.fromJson(responseBody, CzApiResponse::class.java) } catch (e: Exception) { null }
-                        log("✅ УСПЕХ! Черновик создан в ЧЗ.")
+                        log("✅ УСПЕХ! Документ создан в ЧЗ.")
                         log("ID: ${apiResp?.documentId ?: "Принят"}")
                         Toast.makeText(this@MainActivity, "Черновик создался в ЧЗ!", Toast.LENGTH_LONG).show()
 
@@ -627,9 +634,10 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             } catch (e: Exception) {
+                val errorDetails = e.localizedMessage ?: e.message ?: "Unknown socket error"
+                log("💥 Ошибка сети ($errorDetails)")
                 withContext(Dispatchers.Main) {
-                    log("💥 Ошибка сети: ${e.localizedMessage}")
-                    Toast.makeText(this@MainActivity, "Ошибка сети: ${e.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "Сбой сети: $errorDetails", Toast.LENGTH_LONG).show()
                 }
             }
         }
