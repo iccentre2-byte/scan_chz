@@ -130,9 +130,8 @@ class MainActivity : AppCompatActivity() {
     private val downloadReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
-            if (id == downloadId) {
-                log("✅ Скачивание завершено. Запуск установки...")
-                installDownloadedApk()
+            if (id == downloadId && downloadId != -1L) {
+                checkDownloadStatusAndInstall()
             }
         }
     }
@@ -160,8 +159,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.1.1"
-        log("Запуск v1.1.1")
+        binding.tvAppVersion.text = "v1.1.2"
+        log("Запуск v1.1.2")
     }
 
     override fun onResume() {
@@ -410,8 +409,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startApkDownload() {
-        val apkUrl = "https://raw.githubusercontent.com/skazman/cz_set_collector/main/app-release.apk"
-        log("🔄 Старт скачивания обновления...")
+        val apkUrl = "https://raw.githubusercontent.com/iccentre2-byte/scan_chz/main/app-release.apk"
+        log("🔄 Старт скачивания: $apkUrl")
         Toast.makeText(this, "Загрузка обновления...", Toast.LENGTH_SHORT).show()
 
         try {
@@ -427,16 +426,43 @@ class MainActivity : AppCompatActivity() {
             val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
             downloadId = dm.enqueue(request)
         } catch (e: Exception) {
-            log("❌ Ошибка скачивания: ${e.message}")
+            log("❌ Ошибка запуска скачивания: ${e.message}")
             Toast.makeText(this, "Ошибка скачивания: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun checkDownloadStatusAndInstall() {
+        val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        val query = DownloadManager.Query().setFilterById(downloadId)
+        val cursor = dm.query(query)
+
+        if (cursor != null && cursor.moveToFirst()) {
+            val statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+            val reasonIndex = cursor.getColumnIndex(DownloadManager.COLUMN_REASON)
+
+            if (statusIndex != -1) {
+                val status = cursor.getInt(statusIndex)
+                if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                    log("✅ Скачивание успешно! Запуск установки...")
+                    installDownloadedApk()
+                } else if (status == DownloadManager.STATUS_FAILED) {
+                    val reason = if (reasonIndex != -1) cursor.getInt(reasonIndex) else -1
+                    log("❌ Ошибка скачивания (код $reason). Загрузите файл app-release.apk в репозиторий!")
+                    Toast.makeText(this, "Не удалось скачать APK (Код $reason)", Toast.LENGTH_LONG).show()
+                }
+            }
+            cursor.close()
+        } else {
+            log("❌ Загрузка не найдена")
         }
     }
 
     private fun installDownloadedApk() {
         try {
             val file = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "app-update.apk")
-            if (!file.exists()) {
-                log("❌ Файл обновления не найден!")
+            if (!file.exists() || file.length() == 0L) {
+                log("❌ Файл обновления пуст или отсутствует!")
+                Toast.makeText(this, "Файл обновления не найден", Toast.LENGTH_SHORT).show()
                 return
             }
 
@@ -452,7 +478,7 @@ class MainActivity : AppCompatActivity() {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
         } catch (e: Exception) {
-            log("❌ Ошибка установки: ${e.message}")
+            log("❌ Ошибка запуска установки: ${e.message}")
         }
     }
 
@@ -551,7 +577,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         val jsonBody = gson.toJson(requestData)
-        log("🚀 [v1.1.1] Отправка в ЧЗ (pg=$pg, ${sendUnits.size} наборов)...")
+        log("🚀 [v1.1.2] Отправка в ЧЗ (pg=$pg, ${sendUnits.size} наборов)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -607,11 +633,9 @@ class MainActivity : AppCompatActivity() {
         val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         val entry = "[$timestamp] $message\n"
         
-        // Отображение на экране
         val currentText = binding.tvLog.text.toString()
         binding.tvLog.text = "$entry$currentText"
 
-        // Запись в локальный файл для кнопки "Поделиться"
         try {
             logFile.appendText(entry)
         } catch (e: Exception) {}
