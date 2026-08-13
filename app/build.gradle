@@ -12,20 +12,17 @@ android {
         minSdk 21
         targetSdk 34
         
-        // Автоматический номер версии (каждая новая сборка гарантированно новее предыдущей)
-        versionCode (System.currentTimeMillis() / 1000).toInt()
+        versionCode 6
         versionName "1.0.6"
     }
 
     buildTypes {
-        debug {
-            minifyEnabled false
-            // Фиксируем стандартную подпись
-            debuggable true
-        }
         release {
             minifyEnabled false
-            debuggable true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            minifyEnabled false
         }
     }
 
