@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.os.Bundle
+import android.os.Environment
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.View
@@ -25,6 +26,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 
 data class OrganizationProfile(
     val inn: String,
@@ -68,6 +70,14 @@ class MainActivity : AppCompatActivity() {
     private var currentSetCode: String? = null
     private val currentChildrenCodes = mutableListOf<String>()
     private val completedSets = mutableListOf<SetUnit>()
+
+    // Файл для вечного хранения профилей на ТСД
+    private val externalBackupFile: File
+        get() {
+            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            if (!dir.exists()) dir.mkdirs()
+            return File(dir, "cz_tsd_profiles_backup.json")
+        }
 
     private val scannerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -175,13 +185,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadProfilesFromStorage() {
-        val json = prefs.getString("profiles_json", null)
         profilesList.clear()
+        var loadedJson: String? = null
 
-        if (!json.isNullOrEmpty()) {
-            val type = object : TypeToken<List<OrganizationProfile>>() {}.type
-            val savedList: List<OrganizationProfile> = gson.fromJson(json, type)
-            profilesList.addAll(savedList)
+        // 1. Сначала пробуем загрузить из вечного внешнего бэкапа
+        try {
+            val file = externalBackupFile
+            if (file.exists()) {
+                loadedJson = file.readText()
+                log("📦 Профили загружены из бэкапа ТСД")
+            }
+        } catch (e: Exception) {
+            log("⚠️ Не удалось прочесть бэкап: ${e.message}")
+        }
+
+        // 2. Если во внешнем файле сухо, берем из внутренних SharedPreferences
+        if (loadedJson.isNullOrEmpty()) {
+            loadedJson = prefs.getString("profiles_json", null)
+        }
+
+        if (!loadedJson.isNullOrEmpty()) {
+            try {
+                val type = object : TypeToken<List<OrganizationProfile>>() {}.type
+                val savedList: List<OrganizationProfile> = gson.fromJson(loadedJson, type)
+                profilesList.addAll(savedList)
+            } catch (e: Exception) {
+                log("⚠️ Ошибка разбора JSON профилей")
+            }
         }
 
         if (profilesList.isEmpty()) {
@@ -193,7 +223,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveProfilesToStorage() {
         val json = gson.toJson(profilesList)
+
+        // Сохраняем во внутреннее хранилище
         prefs.edit().putString("profiles_json", json).apply()
+
+        // Дублируем во внешний файл для сохранности при переустановках
+        try {
+            val file = externalBackupFile
+            file.writeText(json)
+            log("💾 Профили зафиксированы во внешнем бэкапе")
+        } catch (e: Exception) {
+            log("⚠️ Не удалось сохранить бэкап: ${e.message}")
+        }
     }
 
     private fun updateProfilesSpinner() {
@@ -261,7 +302,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Обработчик кнопки сброса незавершенного набора
         binding.btnResetCurrentSet.setOnClickListener {
             if (currentSetCode != null) {
                 currentSetCode = null
@@ -378,7 +418,6 @@ class MainActivity : AppCompatActivity() {
                     .followSslRedirects(false)
                     .build()
 
-                // Список целевых доменов True API ГИС МТ
                 val targetUrls = listOf(
                     "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?type=CREATE_SET",
                     "https://ismp.crpt.ru/api/v2/true-api/documents/create?type=CREATE_SET",
