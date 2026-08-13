@@ -12,15 +12,35 @@
         android:orientation="vertical"
         android:padding="16dp">
 
-        <TextView
+        <!-- Header with App Version -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="ЧЗ: Наполнение Наборов (M3 SL20)"
-            android:textSize="18sp"
-            android:textStyle="bold"
-            android:textColor="#0F172A"
-            android:gravity="center"
-            android:paddingBottom="12dp" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingBottom="12dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="ЧЗ: Сборка Наборов"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:textColor="#0F172A" />
+
+            <TextView
+                android:id="@+id/tvAppVersion"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="v1.0.1"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:textColor="#FFFFFF"
+                android:background="#2563EB"
+                android:paddingHorizontal="8dp"
+                android:paddingVertical="4dp" />
+        </LinearLayout>
 
         <!-- Profiles Card -->
         <com.google.android.material.card.MaterialCardView
