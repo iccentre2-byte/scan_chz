@@ -1,12 +1,16 @@
 package com.tsd.czsetcollector
 
 import android.annotation.SuppressLint
+import android.app.DownloadManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.text.Editable
 import android.text.TextWatcher
 import android.text.method.ScrollingMovementMethod
@@ -17,6 +21,7 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.google.gson.annotations.SerializedName
@@ -29,6 +34,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 
 data class OrganizationProfile(
     val inn: String,
@@ -69,6 +75,8 @@ class MainActivity : AppCompatActivity() {
 
     private val profilesList = mutableListOf<OrganizationProfile>()
     private var selectedProfileIndex = -1
+
+    private var downloadId: Long = -1L
 
     private val pgPresets = listOf(
         "Бакалея / Сухарики / Снеки (grocery)",
@@ -112,6 +120,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val downloadReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+            if (id == downloadId) {
+                log("✅ Скачивание завершено. Запуск установки...")
+                installDownloadedApk()
+            }
+        }
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -135,8 +153,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.0.9"
-        log("Запуск v1.0.9")
+        binding.tvAppVersion.text = "v1.1.0"
+        log("Запуск v1.1.0")
     }
 
     override fun onResume() {
@@ -149,12 +167,19 @@ class MainActivity : AppCompatActivity() {
             addAction("com.tsd.czsetcollector.SCAN_ACTION")
         }
         registerReceiver(scannerReceiver, filter)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
+        }
     }
 
     override fun onPause() {
         super.onPause()
         setContinuousScanMode(false)
         unregisterReceiver(scannerReceiver)
+        try { unregisterReceiver(downloadReceiver) } catch (e: Exception) {}
     }
 
     private fun setupPgSpinner() {
@@ -337,13 +362,59 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnCheckUpdate.setOnClickListener {
-            log("🔄 Версия v1.0.9 активна")
-            Toast.makeText(this, "У вас установлена версия v1.0.9", Toast.LENGTH_SHORT).show()
+            startApkDownload()
         }
 
         binding.btnSendDraft.setOnClickListener {
             setContinuousScanMode(false)
             sendDraftToChestnyZnak()
+        }
+    }
+
+    private fun startApkDownload() {
+        val apkUrl = "https://raw.githubusercontent.com/skazman/cz_set_collector/main/app-release.apk"
+        log("🔄 Старт скачивания обновления...")
+        Toast.makeText(this, "Загрузка обновления...", Toast.LENGTH_SHORT).show()
+
+        try {
+            val file = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "app-update.apk")
+            if (file.exists()) file.delete()
+
+            val request = DownloadManager.Request(Uri.parse(apkUrl))
+                .setTitle("Обновление ЧЗ Наборы")
+                .setDescription("Загрузка новой версии...")
+                .setDestinationUri(Uri.fromFile(file))
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+
+            val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            downloadId = dm.enqueue(request)
+        } catch (e: Exception) {
+            log("❌ Ошибка скачивания: ${e.message}")
+            Toast.makeText(this, "Ошибка скачивания: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun installDownloadedApk() {
+        try {
+            val file = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "app-update.apk")
+            if (!file.exists()) {
+                log("❌ Файл обновления не найден!")
+                return
+            }
+
+            val intent = Intent(Intent.ACTION_VIEW)
+            val apkUri: Uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                FileProvider.getUriForFile(this, "$packageName.provider", file)
+            } else {
+                Uri.fromFile(file)
+            }
+
+            intent.setDataAndType(apkUri, "application/vnd.android.package-archive")
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        } catch (e: Exception) {
+            log("❌ Ошибка установки: ${e.message}")
         }
     }
 
@@ -442,7 +513,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         val jsonBody = gson.toJson(requestData)
-        log("🚀 [v1.0.9] Отправка в ЧЗ (pg=$pg, ${sendUnits.size} наборов)...")
+        log("🚀 [v1.1.0] Отправка в ЧЗ (pg=$pg, ${sendUnits.size} наборов)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
