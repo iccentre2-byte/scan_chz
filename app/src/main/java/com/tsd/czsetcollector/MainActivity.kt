@@ -1,5 +1,6 @@
 package com.tsd.czsetcollector
 
+import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -9,6 +10,7 @@ import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
 import android.text.method.ScrollingMovementMethod
+import android.view.MotionEvent
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -26,7 +28,6 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.io.File
 
 data class OrganizationProfile(
     val inn: String,
@@ -71,9 +72,6 @@ class MainActivity : AppCompatActivity() {
     private val currentChildrenCodes = mutableListOf<String>()
     private val completedSets = mutableListOf<SetUnit>()
 
-    private val safeBackupFile: File
-        get() = File(getExternalFilesDir(null) ?: filesDir, "cz_profiles_backup.json")
-
     private val scannerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent == null) return
@@ -94,13 +92,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Включаем прокрутку лога пальцем
+        // Фикс скролла лога: перехватываем касания у внешнего ScrollView
         binding.tvLog.movementMethod = ScrollingMovementMethod()
+        binding.tvLog.setOnTouchListener { v, event ->
+            v.parent.requestDisallowInterceptTouchEvent(true)
+            if (event.action and MotionEvent.ACTION_MASK == MotionEvent.ACTION_UP) {
+                v.parent.requestDisallowInterceptTouchEvent(false)
+            }
+            false
+        }
 
         prefs = getSharedPreferences("cz_multi_profiles", Context.MODE_PRIVATE)
 
@@ -109,8 +115,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.0.5"
-        log("Запуск приложения v1.0.5")
+        binding.tvAppVersion.text = "v1.0.6"
+        log("Запуск v1.0.6")
     }
 
     override fun onResume() {
@@ -184,19 +190,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadProfilesFromStorage() {
         profilesList.clear()
-        var loadedJson: String? = prefs.getString("profiles_json", null)
-
-        if (loadedJson.isNullOrEmpty()) {
-            try {
-                val file = safeBackupFile
-                if (file.exists()) {
-                    loadedJson = file.readText()
-                    log("📦 Профили подтянуты из резервного файла")
-                }
-            } catch (e: Exception) {
-                log("⚠️ Ошибка бэкапа: ${e.message}")
-            }
-        }
+        val loadedJson = prefs.getString("profiles_json", null)
 
         if (!loadedJson.isNullOrEmpty()) {
             try {
@@ -204,7 +198,7 @@ class MainActivity : AppCompatActivity() {
                 val savedList: List<OrganizationProfile> = gson.fromJson(loadedJson, type)
                 profilesList.addAll(savedList)
             } catch (e: Exception) {
-                log("⚠️ Ошибка JSON")
+                log("⚠️ Ошибка JSON профилей")
             }
         }
 
@@ -218,14 +212,7 @@ class MainActivity : AppCompatActivity() {
     private fun saveProfilesToStorage() {
         val json = gson.toJson(profilesList)
         prefs.edit().putString("profiles_json", json).apply()
-
-        try {
-            val file = safeBackupFile
-            file.writeText(json)
-            log("💾 Профиль сохранен во внутреннем бэкапе")
-        } catch (e: Exception) {
-            log("⚠️ Ошибка записи бэкапа: ${e.message}")
-        }
+        log("💾 Профиль сохранен")
     }
 
     private fun updateProfilesSpinner() {
@@ -269,10 +256,10 @@ class MainActivity : AppCompatActivity() {
 
             if (existingIndex >= 0) {
                 profilesList[existingIndex] = newProfile
-                Toast.makeText(this, "Профиль ИНН $inn обновлен", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Профиль $inn обновлен", Toast.LENGTH_SHORT).show()
             } else {
                 profilesList.add(newProfile)
-                Toast.makeText(this, "Новый профиль ИНН $inn сохранен", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Профиль $inn сохранен", Toast.LENGTH_SHORT).show()
             }
 
             saveProfilesToStorage()
@@ -299,10 +286,8 @@ class MainActivity : AppCompatActivity() {
                 currentChildrenCodes.clear()
                 setContinuousScanMode(false)
                 updateUi()
-                log("⚠️ Открытый набор сброшен пользователем.")
+                log("⚠️ Набор сброшен")
                 Toast.makeText(this, "Набор сброшен.", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this, "Нет открытого набора для сброса", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -314,7 +299,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun processScannedBarcode(rawBarcode: String) {
         val barcode = cleanCode(rawBarcode)
-        log("Сканирование: $barcode")
+        log("Скан: $barcode")
         val targetCount = binding.etCountPerSet.text.toString().toIntOrNull() ?: 6
 
         if (currentSetCode == null) {
@@ -322,17 +307,17 @@ class MainActivity : AppCompatActivity() {
             currentChildrenCodes.clear()
             
             setContinuousScanMode(true)
-            log("-> Принят НАБОР: $barcode (НЕПРЕРЫВНЫЙ СКАНЕР ВКЛ)")
+            log("-> НАБОР: $barcode")
             Toast.makeText(this, "Набор открыт!", Toast.LENGTH_SHORT).show()
         } else {
             if (currentChildrenCodes.contains(barcode)) {
-                log("⚠️ Ошибка: Дубликат пачки!")
+                log("⚠️ Дубликат пачки!")
                 Toast.makeText(this, "Дубликат пачки!", Toast.LENGTH_SHORT).show()
                 return
             }
 
             if (barcode == currentSetCode) {
-                log("⚠️ Ошибка: Сосканирован код Набора вместо пачки!")
+                log("⚠️ Сосканирован код Набора!")
                 return
             }
 
@@ -343,7 +328,7 @@ class MainActivity : AppCompatActivity() {
                 completedSets.add(SetUnit(currentSetCode!!, ArrayList(currentChildrenCodes)))
                 
                 setContinuousScanMode(false)
-                log("✅ Набор [${currentSetCode!!}] ЗАКРЫТ.")
+                log("✅ Набор ЗАКРЫТ")
                 Toast.makeText(this, "Набор закрыт!", Toast.LENGTH_SHORT).show()
                 
                 currentSetCode = null
@@ -400,52 +385,41 @@ class MainActivity : AppCompatActivity() {
         )
 
         val jsonBody = gson.toJson(requestData)
-        log("🚀 [v1.0.5] Отправка в ЧЗ (${sendUnits.size} наборов)...")
+        log("🚀 Отправка в ЧЗ (${sendUnits.size} наборов)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val client = OkHttpClient.Builder()
-                    .followRedirects(false)
-                    .followSslRedirects(false)
-                    .build()
+                val client = OkHttpClient.Builder().build()
 
                 val url = "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?type=CREATE_SET"
                 val mediaType = "application/json; charset=utf-8".toMediaType()
 
-                log("📡 POST -> $url")
-                
                 val request = Request.Builder()
                     .url(url)
                     .post(jsonBody.toRequestBody(mediaType))
                     .addHeader("Authorization", authHeader)
                     .addHeader("Accept", "application/json")
                     .addHeader("Content-Type", "application/json; charset=utf-8")
-                    .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                     .build()
 
                 val response = client.newCall(request).execute()
                 val responseCode = response.code
                 val responseBody = response.body?.string() ?: ""
 
-                log("📩 Ответ [$responseCode]")
-
                 withContext(Dispatchers.Main) {
                     if (response.isSuccessful) {
                         val apiResp = try { gson.fromJson(responseBody, CzApiResponse::class.java) } catch (e: Exception) { null }
                         log("✅ УСПЕХ! Черновик создан в ЧЗ.")
-                        log("ID Документа: ${apiResp?.documentId ?: "Принят"}")
+                        log("ID: ${apiResp?.documentId ?: "Принят"}")
                         Toast.makeText(this@MainActivity, "Черновик отправлен в ЧЗ!", Toast.LENGTH_LONG).show()
 
                         completedSets.clear()
                         currentSetCode = null
                         currentChildrenCodes.clear()
                         updateUi()
-                    } else if (responseCode in listOf(301, 302, 307, 308)) {
-                        log("❌ ОШИБКА АВТОРИЗАЦИИ ЧЗ [$responseCode]: Токен (Token) недействителен или истёк. Скопируйте свежий Bearer Token из ЛК Честного ЗНАКа!")
-                        Toast.makeText(this@MainActivity, "Ошибка: Токен истёк!", Toast.LENGTH_LONG).show()
                     } else {
-                        log("❌ ОШИБКА ЧЗ [$responseCode]: $responseBody")
-                        Toast.makeText(this@MainActivity, "Ошибка ответа ЧЗ: $responseCode", Toast.LENGTH_LONG).show()
+                        log("❌ ОШИБКА [$responseCode]: $responseBody")
+                        Toast.makeText(this@MainActivity, "Ошибка ЧЗ: $responseCode", Toast.LENGTH_LONG).show()
                     }
                 }
             } catch (e: Exception) {
@@ -460,6 +434,5 @@ class MainActivity : AppCompatActivity() {
     private fun log(message: String) {
         val currentText = binding.tvLog.text.toString()
         binding.tvLog.text = "$message\n$currentText"
-        binding.tvLog.scrollTo(0, 0)
     }
 }
