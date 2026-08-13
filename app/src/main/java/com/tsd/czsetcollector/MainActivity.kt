@@ -25,14 +25,6 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import retrofit2.Response
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
-import retrofit2.http.Body
-import retrofit2.http.Header
-import retrofit2.http.Headers
-import retrofit2.http.POST
-import retrofit2.http.Query
 
 data class OrganizationProfile(
     val inn: String,
@@ -109,7 +101,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        log("Запуск приложения v1.0.1 (build 2)")
+        binding.tvAppVersion.text = "v1.0.2"
+        log("Запуск приложения v1.0.2")
     }
 
     override fun onResume() {
@@ -362,7 +355,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         val jsonBody = gson.toJson(requestData)
-        log("🚀 [v1.0.1] Отправка черновика в ЧЗ (${sendUnits.size} наборов)...")
+        log("🚀 [v1.0.2] Отправка черновика в ЧЗ (${sendUnits.size} наборов)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -371,11 +364,11 @@ class MainActivity : AppCompatActivity() {
                     .followSslRedirects(false)
                     .build()
 
-                // Варианты адресов для обхода перенаправлений Nginx ЧЗ
+                // Список целевых доменов True API ГИС МТ
                 val targetUrls = listOf(
-                    "https://markirovka.crpt.ru/api/v2/true-api/lk/documents/create?type=CREATE_SET",
-                    "https://markirovka.crpt.ru/api/v2/true-api/documents/create?type=CREATE_SET",
-                    "https://markirovka.crpt.ru/api/v2/true-api/lk/documents/create/?type=CREATE_SET"
+                    "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?type=CREATE_SET",
+                    "https://ismp.crpt.ru/api/v2/true-api/documents/create?type=CREATE_SET",
+                    "https://markirovka.crpt.ru/api/v2/true-api/lk/documents/create?type=CREATE_SET"
                 )
 
                 var isSuccess = false
@@ -388,7 +381,7 @@ class MainActivity : AppCompatActivity() {
                         .post(jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
                         .addHeader("Authorization", authHeader)
                         .addHeader("Accept", "application/json")
-                        .addHeader("User-Agent", "Mozilla/5.0 (Android; Mobile TSD App)")
+                        .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                         .build()
 
                     val response = client.newCall(request).execute()
@@ -401,7 +394,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     if (lastResponseCode != 405) {
-                        break // Если ошибка не 405, прерываем цикл перебора
+                        break // Если сервер вернул отклик API (например, 200, 400, 401), прерываем
                     }
                 }
 
