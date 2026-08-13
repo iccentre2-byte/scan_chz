@@ -36,6 +36,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class OrganizationProfile(
     val inn: String,
@@ -101,6 +104,9 @@ class MainActivity : AppCompatActivity() {
     private val currentChildrenCodes = mutableListOf<String>()
     private val completedSets = mutableListOf<SetUnit>()
 
+    private val logFile: File
+        get() = File(getExternalFilesDir(null), "tsd_cz_logs.txt")
+
     private val scannerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent == null) return
@@ -154,8 +160,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.1.0"
-        log("Запуск v1.1.0")
+        binding.tvAppVersion.text = "v1.1.1"
+        log("Запуск v1.1.1")
     }
 
     override fun onResume() {
@@ -373,9 +379,33 @@ class MainActivity : AppCompatActivity() {
             startApkDownload()
         }
 
+        binding.btnShareLog.setOnClickListener {
+            shareLogFile()
+        }
+
         binding.btnSendDraft.setOnClickListener {
             setContinuousScanMode(false)
             sendDraftToChestnyZnak()
+        }
+    }
+
+    private fun shareLogFile() {
+        try {
+            if (!logFile.exists() || logFile.length() == 0L) {
+                Toast.makeText(this, "Лог пока пуст", Toast.LENGTH_SHORT).show()
+                return
+            }
+
+            val logUri: Uri = FileProvider.getUriForFile(this, "$packageName.provider", logFile)
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, logUri)
+                putExtra(Intent.EXTRA_SUBJECT, "Лог работы ТСД Честный ЗНАК")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(shareIntent, "Отправить лог через..."))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Ошибка отправки лога: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -521,7 +551,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         val jsonBody = gson.toJson(requestData)
-        log("🚀 [v1.1.0] Отправка в ЧЗ (pg=$pg, ${sendUnits.size} наборов)...")
+        log("🚀 [v1.1.1] Отправка в ЧЗ (pg=$pg, ${sendUnits.size} наборов)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -529,6 +559,10 @@ class MainActivity : AppCompatActivity() {
 
                 val url = "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?pg=$pg&type=CREATE_SET"
                 val mediaType = "application/json; charset=utf-8".toMediaType()
+
+                log("📡 REQ: POST $url")
+                log("🔑 AUTH: ${authHeader.take(15)}...")
+                log("📦 BODY: $jsonBody")
 
                 val request = Request.Builder()
                     .url(url)
@@ -541,6 +575,8 @@ class MainActivity : AppCompatActivity() {
                 val response = client.newCall(request).execute()
                 val responseCode = response.code
                 val responseBody = response.body?.string() ?: ""
+
+                log("📩 RESP [$responseCode]: $responseBody")
 
                 withContext(Dispatchers.Main) {
                     if (response.isSuccessful) {
@@ -568,7 +604,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun log(message: String) {
+        val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = "[$timestamp] $message\n"
+        
+        // Отображение на экране
         val currentText = binding.tvLog.text.toString()
-        binding.tvLog.text = "$message\n$currentText"
+        binding.tvLog.text = "$entry$currentText"
+
+        // Запись в локальный файл для кнопки "Поделиться"
+        try {
+            logFile.appendText(entry)
+        } catch (e: Exception) {}
     }
 }
