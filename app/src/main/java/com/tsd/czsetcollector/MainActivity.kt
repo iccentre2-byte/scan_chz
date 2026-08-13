@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
 import android.text.method.ScrollingMovementMethod
+import android.util.Base64
 import android.view.MotionEvent
 import android.view.View
 import android.widget.AdapterView
@@ -32,7 +33,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 data class OrganizationProfile(
     val inn: String,
     val token: String,
-    val title: String = "ИНН: $inn"
+    val pg: String = "grocery",
+    val title: String = "ИНН: $inn ($pg)"
 ) {
     override fun toString(): String = title
 }
@@ -51,7 +53,7 @@ data class ProductDocumentSet(
 
 data class SetDocumentRequest(
     @SerializedName("document_format") val documentFormat: String = "MANUAL",
-    @SerializedName("product_document") val productDocument: ProductDocumentSet
+    @SerializedName("product_document") val productDocument: String
 )
 
 data class CzApiResponse(
@@ -67,6 +69,24 @@ class MainActivity : AppCompatActivity() {
 
     private val profilesList = mutableListOf<OrganizationProfile>()
     private var selectedProfileIndex = -1
+
+    private val pgPresets = listOf(
+        "Бакалея / Сухарики / Снеки (grocery)",
+        "Соусы / Майонезы (sauces)",
+        "Консервированная продукция (canned_products)",
+        "Растительные масла (vegetable_oil)",
+        "Кондитерские изделия (sweets)",
+        "Свой код..."
+    )
+
+    private val pgCodes = listOf(
+        "grocery",
+        "sauces",
+        "canned_products",
+        "vegetable_oil",
+        "sweets",
+        ""
+    )
 
     private var currentSetCode: String? = null
     private val currentChildrenCodes = mutableListOf<String>()
@@ -98,7 +118,6 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Фикс скролла лога: перехватываем касания у внешнего ScrollView
         binding.tvLog.movementMethod = ScrollingMovementMethod()
         binding.tvLog.setOnTouchListener { v, event ->
             v.parent.requestDisallowInterceptTouchEvent(true)
@@ -110,13 +129,14 @@ class MainActivity : AppCompatActivity() {
 
         prefs = getSharedPreferences("cz_multi_profiles", Context.MODE_PRIVATE)
 
+        setupPgSpinner()
         loadProfilesFromStorage()
         setupListeners()
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.0.6"
-        log("Запуск v1.0.6")
+        binding.tvAppVersion.text = "v1.0.9"
+        log("Запуск v1.0.9")
     }
 
     override fun onResume() {
@@ -135,6 +155,21 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
         setContinuousScanMode(false)
         unregisterReceiver(scannerReceiver)
+    }
+
+    private fun setupPgSpinner() {
+        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, pgPresets)
+        binding.spinnerPg.adapter = adapter
+        binding.spinnerPg.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val code = pgCodes[position]
+                if (code.isNotEmpty()) {
+                    binding.etProductGroup.setText(code)
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
     }
 
     private fun setContinuousScanMode(enable: Boolean) {
@@ -203,7 +238,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (profilesList.isEmpty()) {
-            profilesList.add(OrganizationProfile("7700000000", "", "Основной профиль"))
+            profilesList.add(OrganizationProfile("7700000000", "", "grocery", "Основной профиль"))
         }
 
         updateProfilesSpinner()
@@ -229,6 +264,15 @@ class MainActivity : AppCompatActivity() {
     private fun applyProfileToInputs(profile: OrganizationProfile) {
         binding.etInn.setText(profile.inn)
         binding.etToken.setText(profile.token)
+        val currentPg = if (profile.pg.isEmpty()) "grocery" else profile.pg
+        binding.etProductGroup.setText(currentPg)
+
+        val presetIndex = pgCodes.indexOf(currentPg)
+        if (presetIndex >= 0) {
+            binding.spinnerPg.setSelection(presetIndex)
+        } else {
+            binding.spinnerPg.setSelection(pgPresets.size - 1)
+        }
     }
 
     private fun setupListeners() {
@@ -245,6 +289,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnSaveProfile.setOnClickListener {
             val inn = binding.etInn.text.toString().trim()
             val token = binding.etToken.text.toString().trim()
+            val pg = binding.etProductGroup.text.toString().trim().ifEmpty { "grocery" }
 
             if (inn.isEmpty()) {
                 Toast.makeText(this, "Введите ИНН!", Toast.LENGTH_SHORT).show()
@@ -252,7 +297,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val existingIndex = profilesList.indexOfFirst { it.inn == inn }
-            val newProfile = OrganizationProfile(inn, token)
+            val newProfile = OrganizationProfile(inn, token, pg)
 
             if (existingIndex >= 0) {
                 profilesList[existingIndex] = newProfile
@@ -289,6 +334,11 @@ class MainActivity : AppCompatActivity() {
                 log("⚠️ Набор сброшен")
                 Toast.makeText(this, "Набор сброшен.", Toast.LENGTH_SHORT).show()
             }
+        }
+
+        binding.btnCheckUpdate.setOnClickListener {
+            log("🔄 Версия v1.0.9 активна")
+            Toast.makeText(this, "У вас установлена версия v1.0.9", Toast.LENGTH_SHORT).show()
         }
 
         binding.btnSendDraft.setOnClickListener {
@@ -359,6 +409,7 @@ class MainActivity : AppCompatActivity() {
     private fun sendDraftToChestnyZnak() {
         val inn = binding.etInn.text.toString().trim()
         val rawToken = binding.etToken.text.toString().trim()
+        val pg = binding.etProductGroup.text.toString().trim().ifEmpty { "grocery" }
 
         if (inn.isEmpty() || rawToken.isEmpty()) {
             Toast.makeText(this, "Заполните ИНН и Token!", Toast.LENGTH_SHORT).show()
@@ -377,21 +428,27 @@ class MainActivity : AppCompatActivity() {
 
         val authHeader = if (rawToken.startsWith("Bearer ")) rawToken else "Bearer $rawToken"
 
+        val docStructure = ProductDocumentSet(
+            inn = inn,
+            setUnits = sendUnits
+        )
+
+        val rawJsonDoc = gson.toJson(docStructure)
+        val base64Doc = Base64.encodeToString(rawJsonDoc.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+
         val requestData = SetDocumentRequest(
-            productDocument = ProductDocumentSet(
-                inn = inn,
-                setUnits = sendUnits
-            )
+            documentFormat = "MANUAL",
+            productDocument = base64Doc
         )
 
         val jsonBody = gson.toJson(requestData)
-        log("🚀 Отправка в ЧЗ (${sendUnits.size} наборов)...")
+        log("🚀 [v1.0.9] Отправка в ЧЗ (pg=$pg, ${sendUnits.size} наборов)...")
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val client = OkHttpClient.Builder().build()
 
-                val url = "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?type=CREATE_SET"
+                val url = "https://ismp.crpt.ru/api/v2/true-api/lk/documents/create?pg=$pg&type=CREATE_SET"
                 val mediaType = "application/json; charset=utf-8".toMediaType()
 
                 val request = Request.Builder()
@@ -409,16 +466,16 @@ class MainActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) {
                     if (response.isSuccessful) {
                         val apiResp = try { gson.fromJson(responseBody, CzApiResponse::class.java) } catch (e: Exception) { null }
-                        log("✅ УСПЕХ! Черновик создан в ЧЗ.")
-                        log("ID: ${apiResp?.documentId ?: "Принят"}")
-                        Toast.makeText(this@MainActivity, "Черновик отправлен в ЧЗ!", Toast.LENGTH_LONG).show()
+                        log("✅ УСПЕХ! Черновик 'Формирование набора' создан.")
+                        log("ID документа: ${apiResp?.documentId ?: "Принят"}")
+                        Toast.makeText(this@MainActivity, "Черновик создался в ЧЗ!", Toast.LENGTH_LONG).show()
 
                         completedSets.clear()
                         currentSetCode = null
                         currentChildrenCodes.clear()
                         updateUi()
                     } else {
-                        log("❌ ОШИБКА [$responseCode]: $responseBody")
+                        log("❌ ОШИБКА ЧЗ [$responseCode]: $responseBody")
                         Toast.makeText(this@MainActivity, "Ошибка ЧЗ: $responseCode", Toast.LENGTH_LONG).show()
                     }
                 }
