@@ -159,19 +159,20 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        val filter = IntentFilter().apply {
+        val scannerFilter = IntentFilter().apply {
             addAction("com.android.server.scannerservice.broadcast")
             addAction("com.m3.scan.action.SCANNER_OUTPUT")
             addAction("android.intent.ACTION_DECODE_DATA")
             addAction("com.scan.output")
             addAction("com.tsd.czsetcollector.SCAN_ACTION")
         }
-        registerReceiver(scannerReceiver, filter)
+        registerReceiver(scannerReceiver, scannerFilter)
 
+        val downloadFilter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), RECEIVER_EXPORTED)
+            registerReceiver(downloadReceiver, downloadFilter, Context.RECEIVER_EXPORTED)
         } else {
-            registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
+            registerReceiver(downloadReceiver, downloadFilter)
         }
     }
 
