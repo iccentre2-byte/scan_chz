@@ -21,6 +21,11 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
+    - name: Download gradle-wrapper.jar if missing
+      run: |
+        mkdir -p gradle/wrapper
+        curl -sL https://raw.githubusercontent.com/gradle/gradle/master/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
+
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
@@ -32,6 +37,6 @@ jobs:
         cp app/build/outputs/apk/debug/app-debug.apk app-release.apk
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        git add app-release.apk
-        git commit -m "Auto-update app-release.apk [skip ci]" || echo "No changes to commit"
+        git add app-release.apk gradle/wrapper/gradle-wrapper.jar
+        git commit -m "Auto-update app-release.apk and wrapper [skip ci]" || echo "No changes to commit"
         git push
