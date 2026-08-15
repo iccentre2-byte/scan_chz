@@ -164,8 +164,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.1.5"
-        log("Запуск v1.1.5")
+        binding.tvAppVersion.text = "v1.2.0"
+        log("Запуск v1.2.0")
     }
 
     override fun onResume() {
@@ -389,7 +389,62 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnSendDraft.setOnClickListener {
             setContinuousScanMode(false)
-            sendDraftToChestnyZnak()
+            exportJsonDocument()
+        }
+    }
+
+    private fun exportJsonDocument() {
+        val inn = binding.etInn.text.toString().trim()
+        val pg = binding.etProductGroup.text.toString().trim().ifEmpty { "grocery" }
+
+        if (inn.isEmpty()) {
+            Toast.makeText(this, "Введите ИНН!", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val sendUnits = ArrayList(completedSets)
+        if (currentSetCode != null && currentChildrenCodes.isNotEmpty()) {
+            sendUnits.add(SetUnit(currentSetCode!!, ArrayList(currentChildrenCodes)))
+        }
+
+        if (sendUnits.isEmpty()) {
+            Toast.makeText(this, "Нет наборов для выгрузки!", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val actionId = if (pg == "tobacco" || pg == "otp") 20 else 30
+        val docStructure = ProductDocumentSet(
+            actionId = actionId,
+            inn = inn,
+            setUnits = sendUnits
+        )
+
+        val rawJsonDoc = gson.toJson(docStructure)
+        
+        try {
+            val fileName = "cz_set_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.json"
+            val file = File(getExternalFilesDir(null), fileName)
+            file.writeText(rawJsonDoc, Charsets.UTF_8)
+
+            log("📄 JSON документ сохранен: ${file.name}")
+
+            val uri: Uri = FileProvider.getUriForFile(this, "$packageName.provider", file)
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/json"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "Документ Наборов Честный ЗНАК ($pg)")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(shareIntent, "Отправить JSON документ..."))
+
+            completedSets.clear()
+            currentSetCode = null
+            currentChildrenCodes.clear()
+            updateUi()
+
+        } catch (e: Exception) {
+            log("❌ Ошибка сохранения JSON: ${e.message}")
+            Toast.makeText(this, "Ошибка сохранения файла", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -544,103 +599,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.tvTotalCompletedSets.text = "Закрытых наборов к отправке: ${completedSets.size}"
-    }
-
-    private fun sendDraftToChestnyZnak() {
-        val inn = binding.etInn.text.toString().trim()
-        val rawToken = binding.etToken.text.toString().trim()
-        val pg = binding.etProductGroup.text.toString().trim().ifEmpty { "grocery" }
-
-        if (inn.isEmpty() || rawToken.isEmpty()) {
-            Toast.makeText(this, "Заполните ИНН и Token!", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val sendUnits = ArrayList(completedSets)
-        if (currentSetCode != null && currentChildrenCodes.isNotEmpty()) {
-            sendUnits.add(SetUnit(currentSetCode!!, ArrayList(currentChildrenCodes)))
-        }
-
-        if (sendUnits.isEmpty()) {
-            Toast.makeText(this, "Нет готовых наборов для отправки!", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val authHeader = if (rawToken.startsWith("Bearer ")) rawToken else "Bearer $rawToken"
-
-        val actionId = if (pg == "tobacco" || pg == "otp") 20 else 30
-
-        val docStructure = ProductDocumentSet(
-            actionId = actionId,
-            inn = inn,
-            setUnits = sendUnits
-        )
-
-        val rawJsonDoc = gson.toJson(docStructure)
-        val base64Doc = Base64.encodeToString(rawJsonDoc.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-
-        val requestData = SetDocumentRequest(
-            documentFormat = "MANUAL",
-            productDocument = base64Doc
-        )
-
-        val jsonBody = gson.toJson(requestData)
-        log("🚀 [v1.1.5] Отправка в ЧЗ (pg=$pg, ${sendUnits.size} шт)...")
-
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                // Настроенный клиент с увеличенными таймаутами и поддержкой TLS
-                val client = OkHttpClient.Builder()
-                    .connectTimeout(30, TimeUnit.SECONDS)
-                    .readTimeout(30, TimeUnit.SECONDS)
-                    .writeTimeout(30, TimeUnit.SECONDS)
-                    .retryOnConnectionFailure(true)
-                    .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.CLEARTEXT))
-                    .build()
-
-                val url = "https://ismp.crpt.ru/api/v2/true-api/documents/create?pg=$pg"
-                val mediaType = "application/json; charset=utf-8".toMediaType()
-
-                log("📡 REQ: POST $url")
-
-                val request = Request.Builder()
-                    .url(url)
-                    .post(jsonBody.toRequestBody(mediaType))
-                    .addHeader("Authorization", authHeader)
-                    .addHeader("Accept", "application/json")
-                    .addHeader("Content-Type", "application/json; charset=utf-8")
-                    .build()
-
-                val response = client.newCall(request).execute()
-                val responseCode = response.code
-                val responseBody = response.body?.string() ?: ""
-
-                log("📩 RESP [$responseCode]: $responseBody")
-
-                withContext(Dispatchers.Main) {
-                    if (response.isSuccessful) {
-                        val apiResp = try { gson.fromJson(responseBody, CzApiResponse::class.java) } catch (e: Exception) { null }
-                        log("✅ УСПЕХ! Документ создан в ЧЗ.")
-                        log("ID: ${apiResp?.documentId ?: "Принят"}")
-                        Toast.makeText(this@MainActivity, "Черновик создался в ЧЗ!", Toast.LENGTH_LONG).show()
-
-                        completedSets.clear()
-                        currentSetCode = null
-                        currentChildrenCodes.clear()
-                        updateUi()
-                    } else {
-                        log("❌ ОШИБКА ЧЗ [$responseCode]: $responseBody")
-                        Toast.makeText(this@MainActivity, "Ошибка ЧЗ: $responseCode", Toast.LENGTH_LONG).show()
-                    }
-                }
-            } catch (e: Exception) {
-                val errorDetails = e.localizedMessage ?: e.message ?: "Unknown socket error"
-                log("💥 Ошибка сети ($errorDetails)")
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "Сбой сети: $errorDetails", Toast.LENGTH_LONG).show()
-                }
-            }
-        }
     }
 
     @Synchronized
