@@ -25,7 +25,6 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -74,8 +73,9 @@ data class SetDraftRequest(
 )
 
 data class CzApiResponse(
-    @SerializedName("value") val documentId: String?,
+    @SerializedName("value") val value: String?,
     @SerializedName("number") val docNumber: String?,
+    @SerializedName("document_id") val documentId: String?,
     @SerializedName("error_message") val errorMessage: String?,
     @SerializedName("code") val code: String?
 )
@@ -184,20 +184,14 @@ class MainActivity : AppCompatActivity() {
             addAction("com.scan.output")
             addAction("com.tsd.czsetcollector.SCAN_ACTION")
         }
-        ContextCompat.registerReceiver(
-            this,
-            scannerReceiver,
-            scannerFilter,
-            ContextCompat.RECEIVER_EXPORTED
-        )
-
-        val downloadFilter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
-        ContextCompat.registerReceiver(
-            this,
-            downloadReceiver,
-            downloadFilter,
-            ContextCompat.RECEIVER_EXPORTED
-        )
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(scannerReceiver, scannerFilter, Context.RECEIVER_EXPORTED)
+            registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(scannerReceiver, scannerFilter)
+            registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
+        }
     }
 
     override fun onPause() {
@@ -638,8 +632,8 @@ class MainActivity : AppCompatActivity() {
 
             val resInfoList = packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
             for (resolveInfo in resInfoList) {
-                val packageName = resolveInfo.activityInfo.packageName
-                grantUriPermission(packageName, apkUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                val pkgName = resolveInfo.activityInfo.packageName
+                grantUriPermission(pkgName, apkUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
 
             startActivity(intent)
