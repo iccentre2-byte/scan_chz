@@ -12,5 +12,6 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "CZSetCollector"
+
+rootProject.name = "scan_chz"
 include ':app'
