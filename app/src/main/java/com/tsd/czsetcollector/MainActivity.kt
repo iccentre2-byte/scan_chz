@@ -172,7 +172,7 @@ class MainActivity : AppCompatActivity() {
         updateUi()
 
         binding.tvAppVersion.text = "v1.2.4"
-        log("Запуск v1.2.4 (Прямая отправка черновика в ЛК)")
+        log("Запуск v1.2.4")
     }
 
     override fun onResume() {
@@ -272,7 +272,7 @@ class MainActivity : AppCompatActivity() {
 
         val key91Index = code.indexOf("91")
         if (key91Index in 21..35) {
-            return code.substring(0, key91Index)
+            code = code.substring(0, key91Index)
         }
 
         return code.trim()
@@ -620,7 +620,7 @@ class MainActivity : AppCompatActivity() {
         try {
             val file = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "app-update.apk")
             if (!file.exists() || file.length() == 0L) {
-                log("❌ Файл обновления пуст или отсутствует!")
+                log("❌ Файл обновления не найден!")
                 Toast.makeText(this, "Файл обновления не найден", Toast.LENGTH_SHORT).show()
                 return
             }
@@ -696,7 +696,7 @@ class MainActivity : AppCompatActivity() {
                 stopSoftwareScanTrigger()
 
                 log("✅ НАБОР УКОМПЛЕКТОВАН (${completedSets.size} шт)")
-                Toast.makeText(this, "Набор закрыт! Отсканируйте следующий НАБОР", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Набор закрыт! Сканируйте следующий НАБОР", Toast.LENGTH_SHORT).show()
                 
                 currentSetCode = null
                 currentChildrenCodes.clear()
