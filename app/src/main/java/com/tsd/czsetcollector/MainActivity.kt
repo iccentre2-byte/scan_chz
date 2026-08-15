@@ -18,6 +18,7 @@ import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
 import android.text.method.ScrollingMovementMethod
+import android.util.Base64
 import android.view.MotionEvent
 import android.view.View
 import android.widget.AdapterView
@@ -30,10 +31,20 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.google.gson.annotations.SerializedName
 import com.tsd.czsetcollector.databinding.ActivityMainBinding
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.ConnectionSpec
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 data class OrganizationProfile(
     val inn: String,
@@ -54,6 +65,19 @@ data class ProductDocumentSet(
     @SerializedName("version") val version: Int = 1,
     @SerializedName("inn") val inn: String,
     @SerializedName("set_units") val setUnits: List<SetUnit>
+)
+
+data class SetDraftRequest(
+    @SerializedName("document_format") val documentFormat: String = "MANUAL",
+    @SerializedName("type") val type: String = "AGGREGATION_DOCUMENT",
+    @SerializedName("product_document") val productDocument: String
+)
+
+data class CzApiResponse(
+    @SerializedName("value") val documentId: String?,
+    @SerializedName("number") val docNumber: String?,
+    @SerializedName("error_message") val errorMessage: String?,
+    @SerializedName("code") val code: String?
 )
 
 class MainActivity : AppCompatActivity() {
@@ -147,8 +171,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.2.3"
-        log("Запуск v1.2.3 (Строгая валидация GS1 / ЧЗ)")
+        binding.tvAppVersion.text = "v1.2.4"
+        log("Запуск v1.2.4 (Прямая отправка черновика в ЛК)")
     }
 
     override fun onResume() {
@@ -248,25 +272,17 @@ class MainActivity : AppCompatActivity() {
 
         val key91Index = code.indexOf("91")
         if (key91Index in 21..35) {
-            code = code.substring(0, key91Index)
+            return code.substring(0, key91Index)
         }
 
         return code.trim()
     }
 
-    /**
-     * Строгая валидация Честного ЗНАКа (GS1 DataMatrix / Агрегаты)
-     * Отсекает токены, случайные строки и обычные штрихкоды
-     */
     private fun isChestnyZnakCode(code: String): Boolean {
-        // Исключаем обычные штрихкоды EAN-8, EAN-13, ITF-14
         if (code.matches(Regex("^\\d{8}$")) || code.matches(Regex("^\\d{12,14}$"))) {
             return false
         }
-        // Токены и мусорные строки (например 8pudnv71n6...) не имеют формата GS1
-        // Формат Честного ЗНАКа для потребительской упаковки: 01 + 14 цифр GTIN + 21 + серийный номер
         val isStandardGs1 = code.startsWith("01") && code.length >= 21 && code.substring(2).take(14).all { it.isDigit() }
-        // Формат групповой тары / агрегатов (SSCC): 00 + 18 цифр
         val isSscc = code.startsWith("00") && code.length == 20 && code.drop(2).all { it.isDigit() }
 
         return isStandardGs1 || isSscc
@@ -415,7 +431,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnSendDraft.setOnClickListener {
             setContinuousScanMode(false)
             stopSoftwareScanTrigger()
-            exportJsonDocument()
+            sendDraftDirectlyToLk()
         }
     }
 
@@ -434,12 +450,13 @@ class MainActivity : AppCompatActivity() {
         startApkDownload()
     }
 
-    private fun exportJsonDocument() {
+    private fun sendDraftDirectlyToLk() {
         val inn = binding.etInn.text.toString().trim()
+        val rawToken = binding.etToken.text.toString().trim()
         val pg = binding.etProductGroup.text.toString().trim().ifEmpty { "grocery" }
 
-        if (inn.isEmpty()) {
-            Toast.makeText(this, "Введите ИНН!", Toast.LENGTH_SHORT).show()
+        if (inn.isEmpty() || rawToken.isEmpty()) {
+            Toast.makeText(this, "Заполните ИНН и Токен!", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -449,11 +466,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (sendUnits.isEmpty()) {
-            Toast.makeText(this, "Нет наборов для выгрузки!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Нет наборов для отправки!", Toast.LENGTH_SHORT).show()
             return
         }
 
+        val authHeader = if (rawToken.startsWith("Bearer ")) rawToken else "Bearer $rawToken"
         val actionId = if (pg == "tobacco" || pg == "otp") 20 else 30
+        val docType = if (pg == "tobacco" || pg == "otp") "CREATE_SET" else "AGGREGATION_DOCUMENT"
+
         val docStructure = ProductDocumentSet(
             actionId = actionId,
             inn = inn,
@@ -461,31 +481,69 @@ class MainActivity : AppCompatActivity() {
         )
 
         val rawJsonDoc = gson.toJson(docStructure)
-        
-        try {
-            val fileName = "cz_set_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.json"
-            val file = File(getExternalFilesDir(null), fileName)
-            file.writeText(rawJsonDoc, Charsets.UTF_8)
+        val base64Doc = Base64.encodeToString(rawJsonDoc.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
 
-            log("📄 JSON сохранен: ${file.name}")
+        val requestData = SetDraftRequest(
+            documentFormat = "MANUAL",
+            type = docType,
+            productDocument = base64Doc
+        )
 
-            val uri: Uri = FileProvider.getUriForFile(this, "$packageName.provider", file)
-            val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                type = "application/json"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                putExtra(Intent.EXTRA_SUBJECT, "Документ Наборов Честный ЗНАК ($pg)")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val jsonBody = gson.toJson(requestData)
+        log("🚀 [v1.2.4] Загрузка черновика в ЛК ЧЗ (pg=$pg, ${sendUnits.size} наборов)...")
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val client = OkHttpClient.Builder()
+                    .connectTimeout(30, TimeUnit.SECONDS)
+                    .readTimeout(30, TimeUnit.SECONDS)
+                    .writeTimeout(30, TimeUnit.SECONDS)
+                    .retryOnConnectionFailure(true)
+                    .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.CLEARTEXT))
+                    .build()
+
+                val url = "https://ismp.crpt.ru/api/v3/true-api/lk/documents/create?pg=$pg"
+                val mediaType = "application/json; charset=utf-8".toMediaType()
+
+                log("📡 POST $url")
+
+                val request = Request.Builder()
+                    .url(url)
+                    .post(jsonBody.toRequestBody(mediaType))
+                    .addHeader("Authorization", authHeader)
+                    .addHeader("Accept", "application/json")
+                    .addHeader("Content-Type", "application/json; charset=utf-8")
+                    .build()
+
+                val response = client.newCall(request).execute()
+                val responseCode = response.code
+                val responseBody = response.body?.string() ?: ""
+
+                log("📩 Ответ [$responseCode]: $responseBody")
+
+                withContext(Dispatchers.Main) {
+                    if (response.isSuccessful) {
+                        val apiResp = try { gson.fromJson(responseBody, CzApiResponse::class.java) } catch (e: Exception) { null }
+                        val docId = apiResp?.value ?: apiResp?.docNumber ?: apiResp?.documentId ?: "Создан"
+                        log("✅ ЧЕРНОВИК СОЗДАН В ЛК! (ID: $docId)")
+                        Toast.makeText(this@MainActivity, "Черновик сохранён в ЛК! Подпишите его на ПК.", Toast.LENGTH_LONG).show()
+
+                        completedSets.clear()
+                        currentSetCode = null
+                        currentChildrenCodes.clear()
+                        updateUi()
+                    } else {
+                        log("❌ Ошибка ЛК [$responseCode]: $responseBody")
+                        Toast.makeText(this@MainActivity, "Ошибка: $responseCode", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                val err = e.localizedMessage ?: "Сбой соединения"
+                log("💥 Ошибка сети: $err")
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Сбой сети: $err", Toast.LENGTH_LONG).show()
+                }
             }
-            startActivity(Intent.createChooser(shareIntent, "Отправить JSON документ..."))
-
-            completedSets.clear()
-            currentSetCode = null
-            currentChildrenCodes.clear()
-            updateUi()
-
-        } catch (e: Exception) {
-            log("❌ Ошибка выгрузки JSON: ${e.message}")
-            Toast.makeText(this, "Ошибка сохранения файла", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -527,7 +585,7 @@ class MainActivity : AppCompatActivity() {
             val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
             downloadId = dm.enqueue(request)
         } catch (e: Exception) {
-            log("❌ Ошибка скачивания: ${e.message}")
+            log("❌ Ошибка запуска скачивания: ${e.message}")
             Toast.makeText(this, "Ошибка скачивания: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
@@ -596,7 +654,6 @@ class MainActivity : AppCompatActivity() {
         val barcode = cleanCode(rawBarcode)
         val targetCount = binding.etCountPerSet.text.toString().toIntOrNull() ?: 6
 
-        // 1. Строгая проверка на формат GS1 / Честный ЗНАК
         if (!isChestnyZnakCode(barcode)) {
             log("⚠️ Отклонено: не код Честного ЗНАКа ($barcode)")
             Toast.makeText(this, "Не является кодом Честного ЗНАКа!", Toast.LENGTH_SHORT).show()
@@ -608,7 +665,6 @@ class MainActivity : AppCompatActivity() {
 
         log("Скан ЧЗ: $barcode")
 
-        // 2. Логика комплектации
         if (currentSetCode == null) {
             currentSetCode = barcode
             currentChildrenCodes.clear()
@@ -640,7 +696,7 @@ class MainActivity : AppCompatActivity() {
                 stopSoftwareScanTrigger()
 
                 log("✅ НАБОР УКОМПЛЕКТОВАН (${completedSets.size} шт)")
-                Toast.makeText(this, "Набор закрыт! Сканируйте следующий НАБОР", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Набор закрыт! Отсканируйте следующий НАБОР", Toast.LENGTH_SHORT).show()
                 
                 currentSetCode = null
                 currentChildrenCodes.clear()
@@ -668,7 +724,7 @@ class MainActivity : AppCompatActivity() {
             binding.tvProgress.text = "Пачек в наборе: ${currentChildrenCodes.size} / $targetCount"
         }
 
-        binding.tvTotalCompletedSets.text = "Закрытых наборов к выгрузке: ${completedSets.size}"
+        binding.tvTotalCompletedSets.text = "Закрытых наборов к отправке: ${completedSets.size}"
     }
 
     @Synchronized
