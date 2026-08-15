@@ -9,13 +9,12 @@ android {
 
     defaultConfig {
         applicationId "com.tsd.czsetcollector"
-        minSdk 21
+        minSdk 24
         targetSdk 34
-        
-        versionCode 6
-        versionName "1.0.6"
+        versionCode 3        // <-- Увеличьте до 3
+        versionName "1.2.2"  // <-- Увеличьте до 1.2.2
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
-
     buildTypes {
         release {
             minifyEnabled false
