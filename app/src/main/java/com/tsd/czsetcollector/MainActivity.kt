@@ -7,12 +7,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
 import android.text.method.ScrollingMovementMethod
@@ -145,8 +147,8 @@ class MainActivity : AppCompatActivity() {
         setupKeyAndTextListeners()
         updateUi()
 
-        binding.tvAppVersion.text = "v1.2.1"
-        log("Запуск v1.2.1 (Потоковый режим сканирования)")
+        binding.tvAppVersion.text = "v1.2.3"
+        log("Запуск v1.2.3 (Строгая валидация GS1 / ЧЗ)")
     }
 
     override fun onResume() {
@@ -197,24 +199,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Включение / выключение непрерывного потокового режима луча на ТСД M3 / стандартных сервисах
-     */
     private fun setContinuousScanMode(enable: Boolean) {
-        // 1. Команда утилите M3 Scanner
         val m3Intent = Intent("com.m3.scan.action.SCANNER_SETTING_CHANGE").apply {
             putExtra("setting_name", "continuous_scan")
             putExtra("setting_value", if (enable) 1 else 0)
         }
         sendBroadcast(m3Intent)
 
-        // 2. Универсальная команда режима презентации/потока
         val directIntent = Intent("com.m3.scan.action.CONTINUOUS_SCAN").apply {
             putExtra("enable", enable)
         }
         sendBroadcast(directIntent)
 
-        // 3. Управление аппаратным триггером
         if (enable) {
             startSoftwareScanTrigger()
         } else {
@@ -222,9 +218,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Программное зажигание лазерного/фото луча
-     */
     private fun startSoftwareScanTrigger() {
         val scanTriggerIntent = Intent("com.android.server.scannerservice.m3plugin.start")
         sendBroadcast(scanTriggerIntent)
@@ -233,9 +226,6 @@ class MainActivity : AppCompatActivity() {
         sendBroadcast(altScanTrigger)
     }
 
-    /**
-     * Программное гашение луча
-     */
     private fun stopSoftwareScanTrigger() {
         val scanStopIntent = Intent("com.android.server.scannerservice.m3plugin.stop")
         sendBroadcast(scanStopIntent)
@@ -244,9 +234,6 @@ class MainActivity : AppCompatActivity() {
         sendBroadcast(altScanStop)
     }
 
-    /**
-     * Очистка кода от служебных префиксов и спецсимволов GS1 FNC1
-     */
     private fun cleanCode(rawCode: String): String {
         var code = rawCode.trim()
         
@@ -268,19 +255,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Валидация: проверяет, является ли код маркировкой Честного ЗНАКа (DataMatrix / GS1)
+     * Строгая валидация Честного ЗНАКа (GS1 DataMatrix / Агрегаты)
+     * Отсекает токены, случайные строки и обычные штрихкоды
      */
     private fun isChestnyZnakCode(code: String): Boolean {
-        // Обычный линейный штрихкод EAN-13/EAN-8 отсекаем
+        // Исключаем обычные штрихкоды EAN-8, EAN-13, ITF-14
         if (code.matches(Regex("^\\d{8}$")) || code.matches(Regex("^\\d{12,14}$"))) {
             return false
         }
-        // Честный Знак обычно содержит GTIN (01) + серийный номер (21) либо имеет длину от 20+ символов
-        if (code.startsWith("01") && code.contains("21") && code.length >= 20) {
-            return true
-        }
-        // Допускаются наборы и агрегаты (SSCC / КИГУ / КИН), длина которых > 14 символов
-        return code.length >= 16
+        // Токены и мусорные строки (например 8pudnv71n6...) не имеют формата GS1
+        // Формат Честного ЗНАКа для потребительской упаковки: 01 + 14 цифр GTIN + 21 + серийный номер
+        val isStandardGs1 = code.startsWith("01") && code.length >= 21 && code.substring(2).take(14).all { it.isDigit() }
+        // Формат групповой тары / агрегатов (SSCC): 00 + 18 цифр
+        val isSscc = code.startsWith("00") && code.length == 20 && code.drop(2).all { it.isDigit() }
+
+        return isStandardGs1 || isSscc
     }
 
     private fun setupKeyAndTextListeners() {
@@ -410,13 +399,13 @@ class MainActivity : AppCompatActivity() {
                 setContinuousScanMode(false)
                 stopSoftwareScanTrigger()
                 updateUi()
-                log("⚠️ Набор сброшен оператором")
+                log("⚠️ Набор сброшен")
                 Toast.makeText(this, "Набор сброшен.", Toast.LENGTH_SHORT).show()
             }
         }
 
         binding.btnCheckUpdate.setOnClickListener {
-            startApkDownload()
+            checkInstallPermissionAndDownload()
         }
 
         binding.btnShareLog.setOnClickListener {
@@ -428,6 +417,21 @@ class MainActivity : AppCompatActivity() {
             stopSoftwareScanTrigger()
             exportJsonDocument()
         }
+    }
+
+    private fun checkInstallPermissionAndDownload() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (!packageManager.canRequestPackageInstalls()) {
+                log("⚠️ Запрос разрешения установки приложений")
+                Toast.makeText(this, "Разрешите установку обновлений в настройках", Toast.LENGTH_LONG).show()
+                val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+                return
+            }
+        }
+        startApkDownload()
     }
 
     private fun exportJsonDocument() {
@@ -463,7 +467,7 @@ class MainActivity : AppCompatActivity() {
             val file = File(getExternalFilesDir(null), fileName)
             file.writeText(rawJsonDoc, Charsets.UTF_8)
 
-            log("📄 JSON документ сохранен: ${file.name}")
+            log("📄 JSON сохранен: ${file.name}")
 
             val uri: Uri = FileProvider.getUriForFile(this, "$packageName.provider", file)
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
@@ -480,7 +484,7 @@ class MainActivity : AppCompatActivity() {
             updateUi()
 
         } catch (e: Exception) {
-            log("❌ Ошибка сохранения JSON: ${e.message}")
+            log("❌ Ошибка выгрузки JSON: ${e.message}")
             Toast.makeText(this, "Ошибка сохранения файла", Toast.LENGTH_LONG).show()
         }
     }
@@ -523,7 +527,7 @@ class MainActivity : AppCompatActivity() {
             val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
             downloadId = dm.enqueue(request)
         } catch (e: Exception) {
-            log("❌ Ошибка запуска скачивания: ${e.message}")
+            log("❌ Ошибка скачивания: ${e.message}")
             Toast.makeText(this, "Ошибка скачивания: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
@@ -540,7 +544,7 @@ class MainActivity : AppCompatActivity() {
             if (statusIndex != -1) {
                 val status = cursor.getInt(statusIndex)
                 if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                    log("✅ Скачивание успешно! Запуск установки...")
+                    log("✅ Скачивание завершено! Открытие инсталлера...")
                     installDownloadedApk()
                 } else if (status == DownloadManager.STATUS_FAILED) {
                     val reason = if (reasonIndex != -1) cursor.getInt(reasonIndex) else -1
@@ -563,60 +567,62 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            val intent = Intent(Intent.ACTION_VIEW)
-            val apkUri: Uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                FileProvider.getUriForFile(this, "$packageName.provider", file)
-            } else {
-                Uri.fromFile(file)
+            val apkUri = FileProvider.getUriForFile(
+                this,
+                "$packageName.provider",
+                file
+            )
+
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(apkUri, "application/vnd.android.package-archive")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
             }
 
-            intent.setDataAndType(apkUri, "application/vnd.android.package-archive")
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val resInfoList = packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            for (resolveInfo in resInfoList) {
+                val packageName = resolveInfo.activityInfo.packageName
+                grantUriPermission(packageName, apkUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+
             startActivity(intent)
+            log("🚀 Установщик запущен")
         } catch (e: Exception) {
-            log("❌ Ошибка запуска установки: ${e.message}")
+            log("❌ Ошибка запуска: ${e.message}")
+            Toast.makeText(this, "Ошибка запуска: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
-    /**
-     * Обработка скан-события с фильтрацией Честного ЗНАКа и удержанием потока
-     */
     private fun processScannedBarcode(rawBarcode: String) {
         val barcode = cleanCode(rawBarcode)
         val targetCount = binding.etCountPerSet.text.toString().toIntOrNull() ?: 6
 
-        // Проверка: это Честный ЗНАК или посторонний штрихкод
+        // 1. Строгая проверка на формат GS1 / Честный ЗНАК
         if (!isChestnyZnakCode(barcode)) {
-            log("⚠️ Пропуск: не Честный Знак ($barcode)")
-            Toast.makeText(this, "Нужен код Честного ЗНАКа!", Toast.LENGTH_SHORT).show()
-            // Если набор открыт, продолжаем держать луч включенным
+            log("⚠️ Отклонено: не код Честного ЗНАКа ($barcode)")
+            Toast.makeText(this, "Не является кодом Честного ЗНАКа!", Toast.LENGTH_SHORT).show()
             if (currentSetCode != null) {
-                mainHandler.postDelayed({ startSoftwareScanTrigger() }, 150)
+                mainHandler.postDelayed({ startSoftwareScanTrigger() }, 200)
             }
             return
         }
 
         log("Скан ЧЗ: $barcode")
 
+        // 2. Логика комплектации
         if (currentSetCode == null) {
-            // Открытие нового набора кодом набора
             currentSetCode = barcode
             currentChildrenCodes.clear()
             
-            // Включаем непрерывный луч для потокового сканирования пачек
             setContinuousScanMode(true)
             log("📦 НАБОР ОТКРЫТ: $barcode")
             Toast.makeText(this, "Набор открыт! Сканируйте пачки подряд", Toast.LENGTH_SHORT).show()
         } else {
-            // Проверка на сканирование того же кода набора
             if (barcode == currentSetCode) {
-                log("⚠️ Сосканирован код НАБОРА (уже открыт)!")
+                log("⚠️ Сосканирован код открытого НАБОРА!")
                 mainHandler.postDelayed({ startSoftwareScanTrigger() }, 200)
                 return
             }
 
-            // Проверка на дубликат пачки в текущем наборе
             if (currentChildrenCodes.contains(barcode)) {
                 log("⚠️ Дубликат пачки в наборе!")
                 Toast.makeText(this, "Пачка уже в наборе!", Toast.LENGTH_SHORT).show()
@@ -624,25 +630,21 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            // Добавление пачки в набор
             currentChildrenCodes.add(barcode)
             log("-> Пачка (${currentChildrenCodes.size}/$targetCount): $barcode")
 
             if (currentChildrenCodes.size >= targetCount) {
-                // Набор укомплектован
                 completedSets.add(SetUnit(currentSetCode!!, ArrayList(currentChildrenCodes)))
                 
-                // Гасим луч сканера
                 setContinuousScanMode(false)
                 stopSoftwareScanTrigger()
 
                 log("✅ НАБОР УКОМПЛЕКТОВАН (${completedSets.size} шт)")
-                Toast.makeText(this, "Набор закрыт! Отсканируйте следующий НАБОР", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Набор закрыт! Сканируйте следующий НАБОР", Toast.LENGTH_SHORT).show()
                 
                 currentSetCode = null
                 currentChildrenCodes.clear()
             } else {
-                // Набор ещё не полон: сразу перезапускаем луч для следующей пачки
                 mainHandler.postDelayed({
                     startSoftwareScanTrigger()
                 }, 100)
@@ -666,7 +668,7 @@ class MainActivity : AppCompatActivity() {
             binding.tvProgress.text = "Пачек в наборе: ${currentChildrenCodes.size} / $targetCount"
         }
 
-        binding.tvTotalCompletedSets.text = "Закрытых наборов к отправке: ${completedSets.size}"
+        binding.tvTotalCompletedSets.text = "Закрытых наборов к выгрузке: ${completedSets.size}"
     }
 
     @Synchronized
