@@ -18,6 +18,17 @@ try {
     $profilePayload=Assert-ChzEnvelope (Join-Path $BackupDirectory 'profiles-transfer.json') 'cz-profiles-backup'
     $queuePayload=Assert-ChzEnvelope (Join-Path $BackupDirectory 'queue-transfer.json') 'cz-queue-backup'
     $profileHash=Get-ChzHash $profilePayload; $queueHash=Get-ChzHash $queuePayload
+    foreach($source in @(@{Base='shared_prefs/cz_multi_profiles.xml';Path=$report.profileSource;Hash=$report.profilesStorageSha256},@{Base='files/queue-v1.json';Path=$report.queueSource;Hash=$report.queueStorageSha256})) {
+        if(!$source.Hash){throw 'Backup predates source consistency check; create a fresh backup'}
+        $current=$null
+        foreach($path in @(($source.Base+'.bak'),$source.Base)) {
+            $read=Invoke-ChzNative $adb @('-s',$serial,'shell','-T','run-as',$oldPackage,'cat',$path)
+            if($read.ExitCode -eq 0){$current=@{Path=$path;Text=$read.Text};break}
+            if($read.ErrorText -notmatch 'No such file or directory'){throw 'Cannot recheck source data; no installation'}
+        }
+        if($null -eq $current){$current=@{Path='absent';Text='{"jobs":[]}'}}
+        if($current.Path -ne $source.Path -or (Get-ChzHash $current.Text) -ne $source.Hash){throw 'Profiles or queue changed after backup. Create a fresh backup; no installation.'}
+    }
     $manifest=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'release-manifest.json'),$ChzUtf8) | ConvertFrom-Json
     if($manifest.format -ne 'cz-apk-release' -or $manifest.version -ne 1){throw 'Invalid release manifest'}
     $scratch=Join-Path $PSScriptRoot ('.work\'+[guid]::NewGuid().ToString('N'))

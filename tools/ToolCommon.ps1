@@ -20,7 +20,7 @@ function Invoke-ChzNative([string]$Exe,[string[]]$Arguments,[int]$Timeout=60000)
     $copy=$proc.StandardOutput.BaseStream.CopyToAsync($memory)
     $errors=$proc.StandardError.ReadToEndAsync()
     if(!$proc.WaitForExit($Timeout)) { $proc.Kill();throw 'Tool timed out; no installation performed' }
-    $copy.GetAwaiter().GetResult(); $errorText=$errors.GetAwaiter().GetResult()
+    [void]$copy.GetAwaiter().GetResult(); $errorText=$errors.GetAwaiter().GetResult()
     $bytes=$memory.ToArray();$memory.Dispose()
     $code=$proc.ExitCode;$proc.Dispose()
     if($bytes.Length -gt 32MB){throw 'Tool output too large'}
@@ -39,7 +39,18 @@ function Get-ChzDevice([string]$Adb) {
     $result=Invoke-ChzNative $Adb @('devices','-l')
     if($result.ExitCode -ne 0){throw 'ADB unavailable'}
     $lines=@($result.Text -split '\r?\n' | Where-Object {$_ -match '^([^\s]+)\s+device(?:\s|$)'})
-    if($lines.Count -ne 1){throw 'Exactly one connected TSD is required. Connect by USB or pair through Android Wi-Fi debugging.'}
+    if($lines.Count -eq 0){throw 'No connected TSD. Connect by USB or pair through Android Wi-Fi debugging.'}
+    if($lines.Count -gt 1) {
+        # Android can expose the same paired TSD via both an IP address and an mDNS alias.
+        $hardware=@(foreach($line in $lines){
+            $token=($line -split '\s+')[0]
+            if($token -notmatch '^[A-Za-z0-9._:-]+$' -or $token -match '^emulator-'){throw 'Multiple or unsupported devices; no changes performed'}
+            $id=Invoke-ChzNative $Adb @('-s',$token,'shell','getprop','ro.serialno')
+            if($id.ExitCode -ne 0 -or !$id.Text.Trim()){throw 'Cannot distinguish connected devices'}
+            $id.Text.Trim()
+        })
+        if(@($hardware | Select-Object -Unique).Count -ne 1){throw 'More than one TSD connected; disconnect the others'}
+    }
     $serial=($lines[0] -split '\s+')[0]
     if($serial -notmatch '^[A-Za-z0-9._:-]+$' -or $serial -match '^emulator-' -or ($serial.Contains(':') -and $serial -notmatch '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}$')) {throw 'A physical TSD is required'}
     return $serial

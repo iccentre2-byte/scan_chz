@@ -12,8 +12,9 @@ try {
     $probe=Invoke-ChzNative $adb @('-s',$serial,'exec-out','run-as',$package,'id')
     if($probe.ExitCode -ne 0 -or $probe.Text -notmatch 'uid='){throw 'run-as is unavailable: keep 1.3.0 installed and its data untouched. No backup confirmed.'}
     function Read-Private([string]$File,[switch]$Optional) {
-        $r=Invoke-ChzNative $adb @('-s',$serial,'exec-out','run-as',$package,'cat',$File)
-        if($r.ExitCode -ne 0){if($Optional){return $null};throw "Cannot read $File; backup not confirmed"}
+        # shell -T preserves remote exit status and does not allocate a terminal.
+        $r=Invoke-ChzNative $adb @('-s',$serial,'shell','-T','run-as',$package,'cat',$File)
+        if($r.ExitCode -ne 0){if($Optional -and $r.ErrorText -match 'No such file or directory'){return $null};throw "Cannot read $File; backup not confirmed"}
         return $r.Text
     }
     function Choose-Private([string]$Base) {
@@ -79,7 +80,7 @@ try {
     $files=@('profiles-transfer.json','profiles-original.json','queue-transfer.json','queue-original.json','installed-1.3.0.apk')
     $hashes=[ordered]@{}
     foreach($file in $files){$hashes[$file]=(Get-FileHash -LiteralPath (Join-Path $Destination $file) -Algorithm SHA256).Hash.ToLowerInvariant()}
-    $report=[ordered]@{format='cz-device-backup';version=1;verified=$true;serial=$serial;transport=if($serial.Contains(':')){'wifi'}else{'usb'};package=$package;installedVersion=$identity.Version;installedVersionCode=$identity.Code;signerSha256=$signer;createdUtc=[DateTime]::UtcNow.ToString('o');profilesCount=$safeProfiles.Count;selectedIndex=$selected;queueJobs=@($parsedQueue.jobs).Count;hasCurrent=($null -ne $parsedQueue.current);profileSource=$prefs.Path;queueSource=if($queue){$queue.Path}else{'absent'};files=$hashes;secretsExported=$false}
+    $report=[ordered]@{format='cz-device-backup';version=1;verified=$true;serial=$serial;transport=if($serial.Contains(':') -or $serial.Contains('_adb-tls-')){'wifi'}else{'usb'};package=$package;installedVersion=$identity.Version;installedVersionCode=$identity.Code;signerSha256=$signer;createdUtc=[DateTime]::UtcNow.ToString('o');profilesCount=$safeProfiles.Count;selectedIndex=$selected;queueJobs=@($parsedQueue.jobs).Count;hasCurrent=($null -ne $parsedQueue.current);profileSource=$prefs.Path;queueSource=if($queue){$queue.Path}else{'absent'};profilesStorageSha256=(Get-ChzHash $prefs.Text);queueStorageSha256=(Get-ChzHash $queueRaw);files=$hashes;secretsExported=$false}
     Write-ChzUtf8 (Join-Path $Destination 'verified-backup.json') ($report | ConvertTo-Json -Depth 12)
     Write-ChzUtf8 (Join-Path $Destination 'REPORT.txt') ("BACKUP VERIFIED`r`nProfiles: $($safeProfiles.Count)`r`nQueue jobs: $(@($parsedQueue.jobs).Count)`r`nNo application data changed. No connection keys or signing credentials exported.`r`n")
     Write-Host "BACKUP VERIFIED: $Destination"
