@@ -1,0 +1,47 @@
+test_91_inside_serial_not_truncated (test_core.ContractTests.test_91_inside_serial_not_truncated) ... ok
+test_authentication_uses_random_challenge_attached (test_core.ContractTests.test_authentication_uses_random_challenge_attached) ... ok
+test_bad_codes (test_core.ContractTests.test_bad_codes) ... ok
+test_code_normalization (test_core.ContractTests.test_code_normalization) ... ok
+test_document_info_v4 (test_core.ContractTests.test_document_info_v4) ... ok
+test_document_unknown_not_success (test_core.ContractTests.test_document_unknown_not_success) ... ok
+test_exact_payload_and_signature (test_core.ContractTests.test_exact_payload_and_signature) ... ok
+test_gtin_and_inn (test_core.ContractTests.test_gtin_and_inn) ... ok
+test_host_allowlist (test_core.ContractTests.test_host_allowlist) ... ok
+test_incomplete_wrong_duplicate_rejected (test_core.ContractTests.test_incomplete_wrong_duplicate_rejected) ... ok
+test_nested_and_retired_blocked (test_core.ContractTests.test_nested_and_retired_blocked) ... ok
+test_no_empty_signature (test_core.ContractTests.test_no_empty_signature) ... ok
+test_osu_different_owner_allowed (test_core.ContractTests.test_osu_different_owner_allowed) ... ok
+test_parent_must_belong_to_signer (test_core.ContractTests.test_parent_must_belong_to_signer) ... ok
+test_quotes_and_special_chars_preserved (test_core.ContractTests.test_quotes_and_special_chars_preserved) ... ok
+test_verification_exact_children (test_core.ContractTests.test_verification_exact_children) ... ok
+test_backup_restores (test_core.StoreTests.test_backup_restores) ... ok
+test_cannot_cancel_sent_or_unknown (test_core.StoreTests.test_cannot_cancel_sent_or_unknown) ... ok
+test_code_reserved_across_jobs (test_core.StoreTests.test_code_reserved_across_jobs) ... ok
+test_crash_during_submission_becomes_unknown (test_core.StoreTests.test_crash_during_submission_becomes_unknown) ... ok
+test_enqueue_no_sign_no_submit (test_core.StoreTests.test_enqueue_no_sign_no_submit) ... ok
+test_full_success_requires_document_and_composition (test_core.StoreTests.test_full_success_requires_document_and_composition) ... ok
+test_http_success_is_not_formation_success (test_core.StoreTests.test_http_success_is_not_formation_success) ... ok
+test_local_cancel_releases_codes (test_core.StoreTests.test_local_cancel_releases_codes) ... ok
+test_preflight_failure_no_post (test_core.StoreTests.test_preflight_failure_no_post) ... ok
+test_rejected_cannot_resubmit (test_core.StoreTests.test_rejected_cannot_resubmit) ... ok
+test_restart_keeps_data (test_core.StoreTests.test_restart_keeps_data) ... ok
+test_same_id_changed_payload_rejected (test_core.StoreTests.test_same_id_changed_payload_rejected) ... ok
+test_signer_cancel_keeps_queue (test_core.StoreTests.test_signer_cancel_keeps_queue) ... ok
+test_timeout_never_auto_retries (test_core.StoreTests.test_timeout_never_auto_retries) ... ok
+test_unknown_reconciled_read_only (test_core.StoreTests.test_unknown_reconciled_read_only) ... ok
+test_upload_idempotency (test_core.StoreTests.test_upload_idempotency) ... ok
+test_admin_dns_rebinding_blocked (test_http.HttpTests.test_admin_dns_rebinding_blocked) ... ok
+test_admin_rejects_cross_origin (test_http.HttpTests.test_admin_rejects_cross_origin) ... ok
+test_admin_requires_explicit_confirmation (test_http.HttpTests.test_admin_requires_explicit_confirmation) ... ok
+test_admin_requires_secret (test_http.HttpTests.test_admin_requires_secret) ... ok
+test_lan_addresses (test_http.HttpTests.test_lan_addresses) ... ok
+test_lan_has_no_signing_endpoint (test_http.HttpTests.test_lan_has_no_signing_endpoint) ... ok
+test_qr_and_pairing_persist (test_http.HttpTests.test_qr_and_pairing_persist) ... ok
+test_tls_inbox_accepts_but_never_signs (test_http.HttpTests.test_tls_inbox_accepts_but_never_signs) ... ok
+test_unauthorized_inbox (test_http.HttpTests.test_unauthorized_inbox) ... ok
+test_upload_idempotency_over_tls (test_http.HttpTests.test_upload_idempotency_over_tls) ... ok
+
+----------------------------------------------------------------------
+Ran 42 tests in 8.239s
+
+OK

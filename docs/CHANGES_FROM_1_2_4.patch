@@ -1,0 +1,3151 @@
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -1,49 +1,60 @@
+-name: Build Android APK
+-
++name: Build CHZ pilot (no publishing)
+ on:
++  workflow_dispatch:
+   push:
+-    branches: [ "main" ]
+-
++    branches: ["main"]
++    paths: ["app/**", "companion_pc/**", "tests/**", "*.gradle", "gradle/**", ".github/workflows/build.yml"]
+ permissions:
+-  contents: write
+-
++  contents: read
+ jobs:
+-  build:
++  tests:
+     runs-on: ubuntu-latest
+-
+     steps:
+-    - uses: actions/checkout@v4
+-
+-    - name: Set up JDK 17
+-      uses: actions/setup-java@v4
+-      with:
+-        java-version: '17'
+-        distribution: 'temurin'
+-        cache: gradle
+-
+-    - name: Restore Gradle Wrapper JAR if missing
+-      run: |
+-        mkdir -p gradle/wrapper
+-        if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+-          curl -sL https://raw.githubusercontent.com/gradle/gradle/master/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
+-        fi
+-
+-    - name: Create Fixed Keystore
+-      run: |
+-        mkdir -p ~/.android
+-        keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+-
+-    - name: Grant execute permission for gradlew
+-      run: chmod +x gradlew
+-
+-    - name: Build Standalone APK
+-      run: ./gradlew assembleDebug --stacktrace
+-
+-    - name: Auto-update app-release.apk in repo root
+-      run: |
+-        cp app/build/outputs/apk/debug/app-debug.apk app-release.apk
+-        git config --global user.name "github-actions[bot]"
+-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+-        git add app-release.apk gradle/wrapper/gradle-wrapper.jar
+-        git commit -m "Auto-update app-release.apk [skip ci]" || echo "No changes to commit"
+-        git push
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with:
++          python-version: '3.11'
++      - run: python -m pip install -r companion_pc/requirements.txt
++      - run: python -m unittest discover -s tests -v
++  android-pilot:
++    needs: tests
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-java@v4
++        with:
++          distribution: temurin
++          java-version: '17'
++      - uses: android-actions/setup-android@v3
++      - name: Install SDK
++        run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0'
++      - name: Build and test pilot (different applicationId; does not replace v1.2.4)
++        run: |
++          chmod +x gradlew
++          ./gradlew --no-daemon testDebugUnitTest assembleDebug
++          mkdir -p dist
++          cp app/build/outputs/apk/debug/app-debug.apk dist/CHZ-1.3.0-rc1-pilot.apk
++      - uses: actions/upload-artifact@v4
++        with:
++          name: CHZ-Android-1.3.0-rc1-pilot
++          path: dist/*.apk
++  windows-helper:
++    needs: tests
++    runs-on: windows-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with:
++          python-version: '3.11'
++      - name: Tests and EXE
++        working-directory: companion_pc
++        run: |
++          python -m pip install -r requirements.txt pyinstaller==6.22.3
++          python -m PyInstaller --clean --noconfirm --onefile --name CHZ_PC_Helper --hidden-import qrcode.image.svg --collect-all cryptography --add-data "web:web" --add-data "signer.ps1:." server.py
++          Copy-Item Start_PC.cmd dist/
++          Copy-Item Firewall_PRIVATE.cmd dist/
++          Copy-Item README_PC_RU.md dist/
++      - uses: actions/upload-artifact@v4
++        with:
++          name: CHZ-Windows-helper-1.3.0-rc1
++          path: companion_pc/dist/*
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,18 @@
++.gradle/
++local.properties
++**/build/
++**/.venv/
++**/__pycache__/
++**/*.pyc
++**/dist/
++**/*.spec
++*.apk
++*.aab
++*.jks
++*.keystore
++*.pfx
++*.p12
++**/connection.json
++**/tls.key
++**/tls.crt
++**/queue.sqlite3*
+--- /dev/null
++++ b/README_RU.md
+@@ -0,0 +1,78 @@
++# ЧЗ: Наборы 1.3.0-rc1 — Android + помощник для ПК
++
++Доработка проекта `scan_chz-main.zip` (1.2.4), 11 октября 2026 года.
++
++**Статус:** исходники изменены, помощник реализован, локальные тесты пройдены. Это опытная версия для проверки одного набора, не подтверждённая промышленная сборка. В архиве НЕТ нового готового APK или EXE. Старый APK 1.2.4 намеренно не вложен, чтобы его не приняли за обновление.
++
++## Что теперь делает комплект
++
++ТСД сохраняет код набора и коды пачек → передаёт состав в локальную очередь ПК → пользователь на ПК проверяет состав и выбирает КЭП → помощник подписывает документ SETS_AGGREGATION и отправляет в True API → помощник проверяет обработку документа и фактические вложения набора → ТСД получает статус.
++
++Сканирование и передача на ПК НЕ создают документ в ЧЗ. Для отправки обязательно отдельное подтверждение на ПК. КЭП и PIN на Android не передаются.
++
++## Сначала — код маркировки самого набора
++
++В этой версии заказ кодов в СУЗ, печать этикеток, отчёт о нанесении и редактирование Национального каталога остаются вне программы. Для физического набора используется ранее заказанный Data Matrix с типом «Набор». Это НЕ QR подключения ТСД к помощнику.
++
++Официальная последовательность для бакалеи: карточка набора с составом → заказ кода набора → нанесение и отчёт о нанесении → формирование набора. Для выбранного сценария купленные вложения должны быть «В обороте», а пустой код набора — «Нанесён», тип эмиссии LOCAL. См. `docs/API_AND_SOURCES_RU.md`.
++
++Пять пробных кодов пользователя не заменять и не списывать автоматически. Сначала проверить один существующий код. Если созданы только карточки в каталоге, но сами индивидуальные коды не заказаны, сканировать пока нечего.
++
++## Один раз настроить
++
++1. На ПК с КЭП запустить `companion_pc/Start_PC.cmd`. Нужен Python 3.11+; при первом запуске скрипт устанавливает две Python-зависимости. Готовый EXE отдельно собирается workflow и не входит в этот архив. Подробности в `companion_pc/README_PC_RU.md`.
++2. ПК и ТСД подключить к одному роутеру. На ПК открывается локальная страница помощника. Нажать «Показать подключение / QR».
++3. В новой Android-сборке нажать «Подключить ПК / QR» → «Сканировать QR». Сверить адрес и отпечаток сертификата с ПК. QR содержит секрет подключения, его не публиковать. Камера смартфона в этой версии не добавлена: используется штатный сканер ТСД или ручной ввод адреса, ключа и отпечатка.
++4. Создать профиль: понятное название, свой ИНН, контур, 14-значный GTIN НАБОРА и состав из его карточки. Один GTIN вложения на строку: `GTIN=количество`. Для ассорти перечислить все разные GTIN с их количествами. Сумма 6 сама по себе не заменяет правильный состав.
++
++## Ежедневная работа
++
++Сканировать код набора первым. Затем сканировать пачки. Программа не принимает код самого набора как пачку, повтор той же пачки, неподходящий GTIN или превышение количества по вкусу/виду. При полной комплектации набор сохраняется в очередь ТСД, после чего можно собирать следующий.
++
++Нажать «Передать готовые наборы на ПК». В очередь попадают только полностью собранные наборы. Если ПК недоступен, данные остаются на ТСД. Повторная передача того же задания не создаёт дубль на ПК.
++
++На ПК нажать «Найти сертификаты», выбрать КЭП нужной организации, отметить сначала ОДИН набор, раскрыть «Проверить состав и документ», нажать «Подписать и отправить выбранные в ЧЗ» и подтвердить действие. В производственном контуре это реальный документ учёта, не черновик. PIN вводить только в штатном окне КриптоПро.
++
++Для группы выбранных наборов одного ИНН и контура помощник последовательно отправляет по одному документу на каждый набор. Лимит выбора — 50. При ошибке последовательность останавливается, оставшиеся наборы не отправляются. Это намеренно облегчает контроль первого запуска.
++
++После отправки:
++
++- «На ПК: ожидает подписи» — в ЧЗ ещё ничего не отправлено.
++- «Передан в ЧЗ» / «Обрабатывается» — результат ещё не подтверждён.
++- «Сформирован: состав проверен» — подтверждены данные ЧЗ, а не только HTTP-ответ.
++- «Отклонён ЧЗ», «Требуется проверка» или «Результат неизвестен» — не отправлять повторно вслепую.
++
++Помощник проверяет активные отправки примерно каждые 20 секунд, пока действует полученная сессия. Android запрашивает статусы у помощника примерно каждые 10 секунд, пока открыт на экране. Таймеры не подписывают документы, не выполняют повторный вход по КЭП и не повторяют отправку.
++
++## Работа с ОСУ
++
++Программа не отбрасывает вложение только из-за того, что поле владельца отдельного кода содержит ИНН поставщика. Но это не отменяет контроля ЧЗ: наличие законного прихода по ОСУ и допустимость конкретных кодов проверяются системой маркировки. Приёмку ЭДО программа не выполняет и виртуальный склад не корректирует.
++
++Этот пилот ограничен `grocery`: сухарики и майонезы. Поддерживается формирование из уже введённых в оборот единиц, не из «Нанесённых» вложений. Принадлежность к чужому транспортному агрегату не снимается автоматически: программа останавливает отправку и сообщает о необходимости разобраться с агрегацией.
++
++## Сохранность и исправления
++
++Android сохраняет текущий неполный набор и очередь после сканирования. ПК хранит очередь в SQLite с журналом переходов и резервированием кодов. При сбое записи сканирование останавливается вместо перезаписи пустой очередью.
++
++Незавершённый набор можно сбросить на ТСД. Полностью собранный, но ещё не отправленный в ЧЗ, можно передать на ПК и отменить там. Затем обновить статусы на ТСД и собрать заново. Отмена на ПК — только локальная, это не расформирование в ЧЗ.
++
++Если результат POST неизвестен, повтор автоматически запрещён. Сначала проверить ЧЗ и соответствующий документ. В этой версии нет кнопки принудительного повторного POST, автоматического исправления отклонённого документа или расформирования набора.
++
++Кнопка резервной копии на ТСД экспортирует составы без ключа подключения. На ПК создаётся согласованная копия SQLite. Файлы содержат ИНН и маркировочные коды: передавать только себе/уполномоченному специалисту. Автоматический импорт копии через Android-интерфейс пока не реализован.
++
++## Получение APK и EXE
++
++Workflow `.github/workflows/build.yml` собирает Android и Windows-помощник, но здесь не запускался. Сначала выполняются тесты, затем создаются артефакты (без публикации релиза):
++
++- `CHZ-Android-1.3.0-rc1-pilot` — опытный APK;
++- `CHZ-Windows-helper-1.3.0-rc1` — EXE помощника с файлами запуска.
++
++Пилотный APK имеет отдельный applicationId `com.tsd.czsetcollector.pilot`. Он не заменяет установленную 1.2.4 и не получает её настройки автоматически. Профили в пилоте нужно заполнить заново. Это защита от потери старых данных и несовместимости подписей APK.
++
++Для обновления поверх старой программы нужен исходный ключ подписи APK, а не КЭП ЧЗ. Он в этот архив не включён. Не удалять старое приложение ради установки экспериментальной версии. У повторно собранных debug APK в разных CI-запусках подпись может отличаться: перед обновлением пилота сделать копии и обеспечить постоянный ключ подписи сборок.
++
++## Проверки и ограничения
++
++См. `docs/TEST_REPORT_RU.md`: 42 Python-теста, 24 проверки реального Kotlin-модуля Domain.kt, синтаксические проверки. Полная Android-сборка, работа сканера на ТСД, CAdESCOM на Windows и реальная приёмка документа ЧЗ ещё не проверены. Здесь нет Android SDK/Windows/КЭП, а загрузка средств сборки недоступна.
++
++Не использовать массово до проверки одного из пяти пробных наборов. Заказ/печать кодов, отчёт о нанесении, передача на Ozon, выбытие при продаже, возвраты и расформирование не входят в этот комплект.
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -11,8 +11,9 @@
+         applicationId "com.tsd.czsetcollector"
+         minSdk 24
+         targetSdk 34
+-        versionCode 6
+-        versionName "1.2.4"
++        versionCode 7
++        versionName "1.3.0-rc1"
++        resValue "string", "app_name", "ЧЗ: Наборы"
+ 
+         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+     }
+@@ -23,6 +24,9 @@
+             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+         }
+         debug {
++            applicationIdSuffix '.pilot'
++            versionNameSuffix '-pilot'
++            resValue 'string', 'app_name', 'ЧЗ: Наборы — пилот'
+             minifyEnabled false
+         }
+     }
+@@ -42,6 +46,7 @@
+ }
+ 
+ dependencies {
++    testImplementation 'junit:junit:4.13.2'
+     implementation 'androidx.core:core-ktx:1.12.0'
+     implementation 'androidx.appcompat:appcompat:1.6.1'
+     implementation 'com.google.android.material:material:1.11.0'
+--- /dev/null
++++ b/app/proguard-rules.pro
+@@ -0,0 +1 @@
++# No shrinking in the pilot build.
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -5,16 +5,14 @@
+     <!-- Разрешения -->
+     <uses-permission android:name="android.permission.INTERNET" />
+     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+-    <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION" />
+ 
+     <application
+-        android:allowBackup="true"
++        android:allowBackup="false"
+         android:icon="@android:drawable/sym_def_app_icon"
+-        android:label="ЧЗ: Наборы"
++        android:label="@string/app_name"
+         android:supportsRtl="true"
+         android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar"
+-        android:usesCleartextTraffic="true">
++        android:usesCleartextTraffic="false">
+ 
+         <activity
+             android:name=".MainActivity"
+@@ -27,7 +25,7 @@
+             </intent-filter>
+         </activity>
+ 
+-        <!-- Провайдер для автоустановки скачанных обновлений -->
++        <!-- Экспорт журнала и резервной копии; автозагрузка APK отключена -->
+         <provider
+             android:name="androidx.core.content.FileProvider"
+             android:authorities="${applicationId}.provider"
+--- /dev/null
++++ b/app/src/main/java/com/tsd/czsetcollector/Domain.kt
+@@ -0,0 +1,66 @@
++package com.tsd.czsetcollector
++
++import java.util.UUID
++
++/** This pilot handles grocery UNIT/SET codes with a 13-character serial, not SSCC. */
++object Codes {
++    fun gtin(s: String): Boolean = s.matches(Regex("[0-9]{14}")) &&
++        (s.dropLast(1).mapIndexed { i,c -> (c-'0')*(if(i%2==0)3 else 1) }.sum() + (s.last()-'0'))%10==0
++    fun inn(s: String): Boolean {
++        if(!s.matches(Regex("[0-9]{10}|[0-9]{12}"))) return false
++        fun digit(weights: List<Int>) = weights.mapIndexed { i,w -> (s[i]-'0')*w }.sum()%11%10
++        return if(s.length==10) digit(listOf(2,4,10,3,5,9,4,6,8))==s[9]-'0'
++        else digit(listOf(7,2,4,10,3,5,9,4,6,8))==s[10]-'0' && digit(listOf(3,7,2,4,10,3,5,9,4,6,8))==s[11]-'0'
++    }
++    fun withoutPrefix(raw: String): String {
++        val s=raw.trim(' ','\r','\n','\t')
++        return if(listOf("]d2","]e0","]Q3","]C1").any{s.startsWith(it)}) s.drop(3) else s
++    }
++    fun normalize(raw: String): String {
++        require(raw.length<=512){"Слишком длинный код"}
++        var s=withoutPrefix(raw)
++        if(s.startsWith("(01)")) {
++            val m=Regex("\\(01\\)([0-9]{14})\\(21\\)(.{13})(?:\\((?:91|93)\\).*)?").matchEntire(s)
++                ?: throw IllegalArgumentException("Неоднозначный код. Настройте передачу GS/FNC1 сканером")
++            s="01"+m.groupValues[1]+"21"+m.groupValues[2]
++        }
++        var head=s.substringBefore('\u001d')
++        if(head.length>31) {
++            require(head.substring(31).startsWith("91")||head.substring(31).startsWith("93")){"Нет GS после серийного номера"}
++            head=head.take(31)
++        }
++        require(head.matches(Regex("01[0-9]{14}21[!-~]{13}"))){"Нужен DataMatrix бакалеи, не обычный штрихкод и не SSCC"}
++        require(gtin(head.substring(2,16))){"Ошибочная контрольная цифра GTIN"}
++        return head
++    }
++    fun composition(text: String): Map<String,Int> {
++        val result=linkedMapOf<String,Int>()
++        for(line in text.lines().map{it.trim()}.filter{it.isNotEmpty()}) {
++            val p=line.split('=')
++            require(p.size==2 && gtin(p[0].trim())){"Состав: каждая строка должна иметь вид GTIN=количество"}
++            val qty=p[1].trim().toIntOrNull() ?: throw IllegalArgumentException("Неверное количество")
++            val key=p[0].trim()
++            require(qty in 1..1000 && !result.containsKey(key)){"Количество 1–1000; каждый GTIN укажите один раз"}
++            result[key]=qty
++        }
++        require(result.isNotEmpty() && result.size<=100 && result.values.sum()<=1000){"Заполните состав: не более 1000 пачек"}
++        return result
++    }
++}
++
++data class Template(val setGtin:String="",val expected:Map<String,Int> = emptyMap())
++data class OrganizationProfile(val inn:String="",val pg:String="grocery",val title:String="Новый профиль",
++    val environment:String="production",val template:Template=Template()) { override fun toString()=title }
++data class Job(val schemaVersion:Int=1,val id:String=UUID.randomUUID().toString(),val environment:String="production",
++    val inn:String="",val pg:String="grocery",val template:Template=Template(),val setCode:String="",
++    val children:MutableList<String> = mutableListOf(),var status:String="COLLECTING",var detail:String="",
++    var documentId:String?=null,var uploaded:Boolean=false)
++data class Snapshot(var current:Job?=null,val jobs:MutableList<Job> = mutableListOf())
++data class PcConfig(val url:String="",val key:String="",val pin:String="")
++object Labels {
++    fun status(s:String):String=mapOf("COLLECTING" to "Комплектуется", "LOCAL_READY" to "Собран на ТСД — ещё не на ПК",
++        "WAITING_SIGNATURE" to "На ПК: ожидает подписи", "SUBMITTING" to "ПК отправляет в ЧЗ",
++        "SUBMITTED" to "Передан в ЧЗ", "PROCESSING" to "ЧЗ обрабатывает", "VERIFIED" to "Сформирован: состав проверен",
++        "REJECTED" to "Отклонён ЧЗ", "UNKNOWN" to "Результат неизвестен — НЕ повторять",
++        "BLOCKED" to "ПК: требуется исправление", "CANCELLED_LOCAL" to "Отменён на ПК до отправки", "CHECK_REQUIRED" to "Требуется проверка ЧЗ")[s]?:s
++}
+--- a/app/src/main/java/com/tsd/czsetcollector/MainActivity.kt
++++ b/app/src/main/java/com/tsd/czsetcollector/MainActivity.kt
+@@ -1,222 +1,269 @@
+ package com.tsd.czsetcollector
+ 
+-import android.annotation.SuppressLint
+-import android.app.DownloadManager
+-import android.content.BroadcastReceiver
+-import android.content.Context
+-import android.content.Intent
+-import android.content.IntentFilter
+-import android.content.SharedPreferences
+-import android.content.pm.PackageManager
+-import android.net.Uri
++import android.content.*
+ import android.os.Build
+ import android.os.Bundle
+-import android.os.Environment
+ import android.os.Handler
+ import android.os.Looper
+-import android.provider.Settings
+-import android.text.Editable
+-import android.text.TextWatcher
+ import android.text.method.ScrollingMovementMethod
+ import android.util.Base64
+-import android.view.MotionEvent
+ import android.view.View
+-import android.widget.AdapterView
+-import android.widget.ArrayAdapter
+-import android.widget.Toast
++import android.widget.*
++import androidx.appcompat.app.AlertDialog
+ import androidx.appcompat.app.AppCompatActivity
+ import androidx.core.content.FileProvider
+ import com.google.gson.Gson
+ import com.google.gson.reflect.TypeToken
+-import com.google.gson.annotations.SerializedName
+ import com.tsd.czsetcollector.databinding.ActivityMainBinding
+-import kotlinx.coroutines.CoroutineScope
+-import kotlinx.coroutines.Dispatchers
+-import kotlinx.coroutines.launch
+-import kotlinx.coroutines.withContext
+-import okhttp3.ConnectionSpec
+-import okhttp3.MediaType.Companion.toMediaType
+-import okhttp3.OkHttpClient
+-import okhttp3.Request
+-import okhttp3.RequestBody.Companion.toRequestBody
++import kotlinx.coroutines.*
+ import java.io.File
+ import java.text.SimpleDateFormat
+ import java.util.Date
+ import java.util.Locale
+-import java.util.concurrent.TimeUnit
+-
+-data class OrganizationProfile(
+-    val inn: String,
+-    val token: String,
+-    val pg: String = "grocery",
+-    val title: String = "ИНН: $inn ($pg)"
+-) {
+-    override fun toString(): String = title
+-}
+-
+-data class SetUnit(
+-    @SerializedName("set_code") val setCode: String,
+-    @SerializedName("sGTIN") val sgtinList: List<String>
+-)
+-
+-data class ProductDocumentSet(
+-    @SerializedName("action_id") val actionId: Int = 30,
+-    @SerializedName("version") val version: Int = 1,
+-    @SerializedName("inn") val inn: String,
+-    @SerializedName("set_units") val setUnits: List<SetUnit>
+-)
+-
+-data class SetDraftRequest(
+-    @SerializedName("document_format") val documentFormat: String = "MANUAL",
+-    @SerializedName("type") val type: String = "AGGREGATION_DOCUMENT",
+-    @SerializedName("product_document") val productDocument: String
+-)
+-
+-data class CzApiResponse(
+-    @SerializedName("value") val value: String?,
+-    @SerializedName("number") val docNumber: String?,
+-    @SerializedName("document_id") val documentId: String?,
+-    @SerializedName("error_message") val errorMessage: String?,
+-    @SerializedName("code") val code: String?
+-)
+-
+-class MainActivity : AppCompatActivity() {
+-
+-    private lateinit var binding: ActivityMainBinding
+-    private lateinit var prefs: SharedPreferences
+-    private val gson = Gson()
+-    private val mainHandler = Handler(Looper.getMainLooper())
+-
+-    private val profilesList = mutableListOf<OrganizationProfile>()
+-    private var selectedProfileIndex = -1
+-
+-    private var downloadId: Long = -1L
+-
+-    private val pgPresets = listOf(
+-        "Бакалея / Сухарики / Снеки (grocery)",
+-        "Соусы / Майонезы (sauces)",
+-        "Консервированная продукция (canned_products)",
+-        "Растительные масла (vegetable_oil)",
+-        "Кондитерские изделия (sweets)",
+-        "Табачная продукция (tobacco)",
+-        "Свой код..."
+-    )
+-
+-    private val pgCodes = listOf(
+-        "grocery",
+-        "sauces",
+-        "canned_products",
+-        "vegetable_oil",
+-        "sweets",
+-        "tobacco",
+-        ""
+-    )
+-
+-    private var currentSetCode: String? = null
+-    private val currentChildrenCodes = mutableListOf<String>()
+-    private val completedSets = mutableListOf<SetUnit>()
+-
+-    private val logFile: File
+-        get() = File(getExternalFilesDir(null), "tsd_cz_logs.txt")
+-
+-    private val scannerReceiver = object : BroadcastReceiver() {
+-        override fun onReceive(context: Context?, intent: Intent?) {
+-            if (intent == null) return
+-
+-            val barcode = intent.getStringExtra("m3scannerdata")
+-                ?: intent.getStringExtra("scannerdata")
+-                ?: intent.getStringExtra("barcode_string")
+-                ?: intent.getStringExtra("data")
+-                ?: intent.getStringExtra("scan_data")
+-                ?: intent.getStringExtra("extra_barcode_data")
+-                ?: intent.getByteArrayExtra("barcode")?.let { String(it) }
+-
+-            barcode?.trim()?.let { 
+-                if (it.isNotEmpty()) {
+-                    processScannedBarcode(it) 
++
++class MainActivity:AppCompatActivity() {
++    private lateinit var b:ActivityMainBinding
++    private lateinit var prefs:SharedPreferences
++    private lateinit var store:QueueStore
++    private val gson=Gson()
++    private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main)
++    private val mainHandler=Handler(Looper.getMainLooper())
++    private var snapshot=Snapshot()
++    private val profiles=mutableListOf<OrganizationProfile>()
++    private var selected=0
++    private var halted=false
++    private var networkBusy=false
++    private var pairMode=false
++    private var pc=PcConfig()
++    private var foreground=false
++    private val logFile:File get()=File(getExternalFilesDir(null),"tsd_cz_logs.txt")
++    private val poll=object:Runnable {override fun run(){if(foreground){sync(false,false);mainHandler.postDelayed(this,10000)}}}
++    private val receiver=object:BroadcastReceiver() {
++        override fun onReceive(context:Context?,intent:Intent?) {
++            if(intent==null)return
++            val raw=intent.getStringExtra("m3scannerdata")?:intent.getStringExtra("scannerdata")
++                ?:intent.getStringExtra("barcode_string")?:intent.getStringExtra("data")
++                ?:intent.getStringExtra("scan_data")?:intent.getStringExtra("extra_barcode_data")
++                ?:intent.getByteArrayExtra("barcode")?.let{String(it,Charsets.UTF_8)}
++            if(!raw.isNullOrBlank())scan(raw)
++        }
++    }
++    override fun onCreate(savedInstanceState:Bundle?) {
++        super.onCreate(savedInstanceState);b=ActivityMainBinding.inflate(layoutInflater);setContentView(b.root)
++        prefs=getSharedPreferences("cz_multi_profiles",Context.MODE_PRIVATE);store=QueueStore(filesDir)
++        b.tvLog.movementMethod=ScrollingMovementMethod()
++        b.tvAppVersion.text="1.3.0-rc1 · ОСУ / подпись на ПК"
++        try {snapshot=store.load()} catch(e:Exception){storageFailure(e)}
++        try {pc=gson.fromJson(prefs.getString("pc_connection",null),PcConfig::class.java)?:PcConfig()}catch(e:Exception){pc=PcConfig()}
++        b.spinnerEnvironment.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,
++            listOf("PRODUCTION — реальный ЧЗ","SANDBOX — тестовый контур"))
++        loadProfiles();listeners();render();log("Запуск 1.3.0-rc1. На Android нет подписи и прямой отправки в ЧЗ.")
++    }
++    override fun onResume(){
++        super.onResume();foreground=true
++        val f=IntentFilter().apply {
++            addAction("com.android.server.scannerservice.broadcast");addAction("com.m3.scan.action.SCANNER_OUTPUT")
++            addAction("android.intent.ACTION_DECODE_DATA");addAction("com.scan.output");addAction("com.tsd.czsetcollector.SCAN_ACTION")
++        }
++        if(Build.VERSION.SDK_INT>=33)registerReceiver(receiver,f,Context.RECEIVER_EXPORTED) else registerReceiver(receiver,f)
++        mainHandler.postDelayed(poll,10000)
++    }
++    override fun onPause(){
++        foreground=false;mainHandler.removeCallbacks(poll);setContinuousScanMode(false)
++        try{unregisterReceiver(receiver)}catch(e:Exception){};super.onPause()
++    }
++    override fun onDestroy(){scope.cancel();mainHandler.removeCallbacksAndMessages(null);super.onDestroy()}
++    private fun listeners(){
++        b.spinnerProfiles.onItemSelectedListener=object:AdapterView.OnItemSelectedListener{
++            override fun onItemSelected(parent:AdapterView<*>?,view:View?,position:Int,id:Long){
++                selected=position;prefs.edit().putInt("selected_profile_index",position).apply();applyProfile(profiles[position])
++            }
++            override fun onNothingSelected(parent:AdapterView<*>?){}
++        }
++        b.btnSaveProfile.setOnClickListener {attempt{
++            val p=inputProfile();val old=profiles.indexOfFirst{it.title==p.title}
++            if(old>=0){profiles[old]=p;selected=old}else{profiles.add(p);selected=profiles.lastIndex}
++            prefs.edit().putString("profiles_json",gson.toJson(profiles)).putInt("selected_profile_index",selected).commit()
++            profileSpinner();log("Профиль и состав сохранены")
++        }}
++        b.btnDeleteProfile.setOnClickListener {
++            if(profiles.size<=1){toast("Единственный профиль не удаляется");return@setOnClickListener}
++            AlertDialog.Builder(this).setTitle("Удалить профиль?").setMessage("Собранные наборы останутся в очереди со своим ИНН и составом.")
++                .setNegativeButton("Отмена",null).setPositiveButton("Удалить"){_,_->
++                    profiles.removeAt(selected);selected=0
++                    prefs.edit().putString("profiles_json",gson.toJson(profiles)).putInt("selected_profile_index",0).commit();profileSpinner()
++                }.show()
++        }
++        b.btnConnectPc.setOnClickListener{connectDialog()}
++        b.btnSendDraft.setOnClickListener{setContinuousScanMode(false);sync(true,true)}
++        b.btnRefresh.setOnClickListener{sync(false,true)}
++        b.btnResetCurrentSet.setOnClickListener{
++            val j=snapshot.current?:return@setOnClickListener
++            AlertDialog.Builder(this).setTitle("Сбросить незавершённый набор?")
++                .setMessage("Пачек: ${j.children.size}. Этот набор ещё не передавался на ПК. Готовые наборы не будут удалены.")
++                .setNegativeButton("Отмена",null).setPositiveButton("Сбросить"){_,_->snapshot.current=null;persist();setContinuousScanMode(false);render()}.show()
++        }
++        b.btnShareLog.setOnClickListener{share(logFile,"text/plain")}
++        b.btnBackup.setOnClickListener{
++            AlertDialog.Builder(this).setTitle("Экспорт резервной копии")
++                .setMessage("Файл содержит коды маркировки и ИНН, но не ключ подключения к ПК. Передавайте только себе.")
++                .setNegativeButton("Отмена",null).setPositiveButton("Экспортировать"){_,_->attempt{
++                    val f=File(getExternalFilesDir(null),"chz-queue-backup.json");f.writeText(gson.toJson(snapshot));share(f,"application/json")
++                }}.show()
++        }
++        b.btnCheckUpdate.setOnClickListener{
++            AlertDialog.Builder(this).setTitle("Обновление опытной версии")
++                .setMessage("Автозагрузка старого app-release.apk отключена. Новый APK устанавливайте только после проверки версии и подписи. Старую программу и её данные не удаляйте.")
++                .setPositiveButton("Понятно",null).show()
++        }
++        b.etScanInput.showSoftInputOnFocus=false
++        b.etScanInput.setOnEditorActionListener{_,_,_->val value=b.etScanInput.text.toString();b.etScanInput.setText("");if(value.isNotBlank())scan(value);true}
++        b.btnScan.setOnClickListener{b.etScanInput.requestFocus();startSoftwareScanTrigger()}
++    }
++    private fun loadProfiles(){
++        try {
++            val type=object:TypeToken<List<OrganizationProfile>>(){}.type
++            val saved:List<OrganizationProfile>?=gson.fromJson(prefs.getString("profiles_json",null),type)
++            if(saved!=null)profiles.addAll(saved)
++        }catch(e:Exception){log("Старые профили не прочитаны. Исходные настройки не перезаписаны.")}
++        if(profiles.isEmpty())profiles.add(OrganizationProfile(title="Основной профиль"))
++        selected=prefs.getInt("selected_profile_index",0).coerceIn(0,profiles.lastIndex);profileSpinner()
++    }
++    private fun profileSpinner(){
++        b.spinnerProfiles.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,profiles)
++        b.spinnerProfiles.setSelection(selected);applyProfile(profiles[selected])
++    }
++    private fun applyProfile(p:OrganizationProfile){
++        val active=snapshot.current
++        b.etProfileTitle.setText(p.title);b.etInn.setText(active?.inn?:p.inn)
++        b.spinnerEnvironment.setSelection(if((active?.environment?:p.environment)=="sandbox")1 else 0)
++        val template=active?.template?:p.template
++        b.etSetGtin.setText(template.setGtin)
++        b.etComposition.setText(template.expected.entries.joinToString("\n"){"${it.key}=${it.value}"})
++        if(p.pg!="grocery")log("В старом профиле была группа ${p.pg}. В этой версии только grocery; проверьте товары перед сохранением.")
++    }
++    private fun inputProfile():OrganizationProfile {
++        val inn=b.etInn.text.toString().trim();require(Codes.inn(inn)){"Проверьте ИНН и контрольные цифры"}
++        val title=b.etProfileTitle.text.toString().trim();require(title.isNotBlank()){"Назовите профиль, например «Кириешки 6 / ИП»"}
++        val gtin=b.etSetGtin.text.toString().trim();require(Codes.gtin(gtin)){"Заполните 14-значный GTIN НАБОРА из Национального каталога"}
++        return OrganizationProfile(inn,"grocery",title,if(b.spinnerEnvironment.selectedItemPosition==1)"sandbox" else "production",
++            Template(gtin,Codes.composition(b.etComposition.text.toString())))
++    }
++    private fun scan(raw:String){
++        if(halted)return
++        if(pairMode){pairMode=false;setContinuousScanMode(false);attempt{
++            require(raw.length<=4096){"Слишком длинный QR подключения"};val code=Codes.withoutPrefix(raw);require(code.startsWith("CZPAIR1:")){"Это не QR подключения из помощника ПК"}
++            val decoded=String(Base64.decode(code.removePrefix("CZPAIR1:"),Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING),Charsets.UTF_8)
++            val c=gson.fromJson(decoded,PcConfig::class.java);PcClient.validate(c)
++            AlertDialog.Builder(this).setTitle("Подключить этот ПК?")
++                .setMessage("Адрес: ${c.url}\nSHA-256: ${c.pin}\n\nСверьте адрес и отпечаток с экраном ПК. КЭП не передаётся на ТСД.")
++                .setNegativeButton("Отмена",null).setPositiveButton("Подключить"){_,_->savePc(c)}.show()
++        };return}
++        if(Codes.withoutPrefix(raw).startsWith("CZPAIR1:")){toast("Сначала нажмите «Подключить ПК» → «Сканировать QR»");return}
++        attempt{
++            val code=Codes.normalize(raw)
++            val current=snapshot.current
++            val env=current?.environment ?: if(b.spinnerEnvironment.selectedItemPosition==1)"sandbox" else "production"
++            require(snapshot.jobs.none{it.status!="CANCELLED_LOCAL"&&it.environment==env&&(it.setCode==code||it.children.contains(code))}){"Код уже использован в другом собранном наборе"}
++            if(current==null){
++                val profile=inputProfile();require(code.substring(2,16)==profile.template.setGtin){"Сначала сканируйте код НАБОРА с GTIN ${profile.template.setGtin}"}
++                snapshot.current=Job(environment=profile.environment,inn=profile.inn,template=profile.template,setCode=code)
++                if(!persist())return@attempt
++                log("Набор открыт: …${code.takeLast(6)}");setContinuousScanMode(true)
++            }else{
++                require(code!=current.setCode){"Это код самого набора"};require(!current.children.contains(code)){"Дубликат пачки в наборе"}
++                val gtin=code.substring(2,16);val expected=current.template.expected[gtin]?:0
++                require(expected>0){"Этого GTIN нет в составе шаблона: $gtin"}
++                require(current.children.count{it.substring(2,16)==gtin}<expected){"По GTIN $gtin уже набрано нужное количество"}
++                current.children.add(code)
++                if(current.children.size==current.template.expected.values.sum()){
++                    current.status="LOCAL_READY";snapshot.jobs.add(current);snapshot.current=null;setContinuousScanMode(false)
++                    if(!persist())return@attempt
++                    log("Собран на ТСД, не в ЧЗ: …${current.setCode.takeLast(6)}");toast("Набор сохранён. Можно сканировать следующий.")
++                }else{
++                    if(!persist())return@attempt
++                    mainHandler.postDelayed({if(foreground)startSoftwareScanTrigger()},120)
+                 }
+             }
+-        }
+-    }
+-
+-    private val downloadReceiver = object : BroadcastReceiver() {
+-        override fun onReceive(context: Context?, intent: Intent?) {
+-            val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+-            if (id == downloadId && downloadId != -1L) {
+-                checkDownloadStatusAndInstall()
+-            }
+-        }
+-    }
+-
+-    @SuppressLint("ClickableViewAccessibility")
+-    override fun onCreate(savedInstanceState: Bundle?) {
+-        super.onCreate(savedInstanceState)
+-        binding = ActivityMainBinding.inflate(layoutInflater)
+-        setContentView(binding.root)
+-
+-        binding.tvLog.movementMethod = ScrollingMovementMethod()
+-        binding.tvLog.setOnTouchListener { v, event ->
+-            v.parent.requestDisallowInterceptTouchEvent(true)
+-            if (event.action and MotionEvent.ACTION_MASK == MotionEvent.ACTION_UP) {
+-                v.parent.requestDisallowInterceptTouchEvent(false)
+-            }
+-            false
+-        }
+-
+-        prefs = getSharedPreferences("cz_multi_profiles", Context.MODE_PRIVATE)
+-
+-        setupPgSpinner()
+-        loadProfilesFromStorage()
+-        setupListeners()
+-        setupKeyAndTextListeners()
+-        updateUi()
+-
+-        binding.tvAppVersion.text = "v1.2.4"
+-        log("Запуск v1.2.4")
+-    }
+-
+-    override fun onResume() {
+-        super.onResume()
+-        val scannerFilter = IntentFilter().apply {
+-            addAction("com.android.server.scannerservice.broadcast")
+-            addAction("com.m3.scan.action.SCANNER_OUTPUT")
+-            addAction("android.intent.ACTION_DECODE_DATA")
+-            addAction("com.scan.output")
+-            addAction("com.tsd.czsetcollector.SCAN_ACTION")
+-        }
+-        
+-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+-            registerReceiver(scannerReceiver, scannerFilter, Context.RECEIVER_EXPORTED)
+-            registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), Context.RECEIVER_EXPORTED)
+-        } else {
+-            registerReceiver(scannerReceiver, scannerFilter)
+-            registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
+-        }
+-    }
+-
+-    override fun onPause() {
+-        super.onPause()
+-        setContinuousScanMode(false)
+-        stopSoftwareScanTrigger()
+-        try { unregisterReceiver(scannerReceiver) } catch (e: Exception) {}
+-        try { unregisterReceiver(downloadReceiver) } catch (e: Exception) {}
+-    }
+-
+-    private fun setupPgSpinner() {
+-        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, pgPresets)
+-        binding.spinnerPg.adapter = adapter
+-        binding.spinnerPg.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+-                val code = pgCodes[position]
+-                if (code.isNotEmpty()) {
+-                    binding.etProductGroup.setText(code)
++            render()
++        }
++    }
++    private fun sync(upload:Boolean,notify:Boolean){
++        if(networkBusy||halted)return
++        if(pc.url.isBlank()){if(notify)connectDialog();return}
++        val toUpload=if(upload)snapshot.jobs.filter{!it.uploaded&&it.status=="LOCAL_READY"}else emptyList()
++        val toRead=snapshot.jobs.filter{it.uploaded&&it.status!="VERIFIED"&&it.status!="CANCELLED_LOCAL"}.take(100)
++        if(toUpload.isEmpty()&&toRead.isEmpty()){if(notify)toast("Нет новых наборов или незавершённых отправок");return}
++        networkBusy=true;render()
++        scope.launch {
++            try {
++                val client=PcClient(pc)
++                for(job in toUpload){
++                    val reply=withContext(Dispatchers.IO){client.upload(job)};applyReply(job,reply)
++                    if(halted)break
+                 }
+-            }
+-
+-            override fun onNothingSelected(parent: AdapterView<*>?) {}
+-        }
+-    }
+-
++                if(!halted)for(job in toRead){
++                    val reply=withContext(Dispatchers.IO){client.status(job.id)};applyReply(job,reply)
++                    if(halted)break
++                }
++                if(notify)log(if(upload)"Готовые наборы переданы в очередь ПК. Для ЧЗ нужна подпись на ПК." else "Статусы с ПК обновлены")
++            }catch(e:CancellationException){throw e}
++             catch(e:Exception){if(notify){log("Связь с ПК: ${e.message}. Очередь сохранена.");toast("${e.message}\nНаборы не удалены")}}
++            finally{networkBusy=false;render()}
++        }
++    }
++    private fun applyReply(original:Job,reply:Job){
++        require(reply.id==original.id&&reply.inn==original.inn&&reply.environment==original.environment&&
++            reply.setCode==original.setCode&&reply.children.toSet()==original.children.toSet()&&reply.children.size==original.children.size&&
++            reply.template==original.template){"ПК вернул другой состав. Ответ не принят"}
++        require(reply.status in setOf("WAITING_SIGNATURE","SUBMITTING","SUBMITTED","PROCESSING","VERIFIED","REJECTED","UNKNOWN","BLOCKED","CHECK_REQUIRED","CANCELLED_LOCAL")){"Неизвестный статус ПК"}
++        val changed=!original.uploaded||original.status!=reply.status||original.detail!=reply.detail||original.documentId!=reply.documentId
++        original.status=reply.status;original.detail=reply.detail;original.documentId=reply.documentId;original.uploaded=true
++        if(changed){persist();render()}
++    }
++    private fun connectDialog(){
++        val layout=LinearLayout(this);layout.orientation=LinearLayout.VERTICAL;layout.setPadding(24,12,24,12)
++        val url=EditText(this).apply{hint="https://192.168.1.10:18765";setText(pc.url)}
++        val key=EditText(this).apply{hint="Ключ подключения к ПК";setText(pc.key);inputType=129}
++        val pin=EditText(this).apply{hint="SHA-256 сертификата ПК (64 символа)";setText(pc.pin)}
++        listOf(url,key,pin).forEach{layout.addView(it)}
++        AlertDialog.Builder(this).setTitle("Подключить помощник ПК").setView(layout)
++            .setNegativeButton("Отмена",null).setNeutralButton("Сканировать QR"){_,_->pairMode=true;toast("Отсканируйте QR из окна помощника ПК");startSoftwareScanTrigger()}
++            .setPositiveButton("Сохранить"){_,_->attempt{val c=PcConfig(url.text.toString().trim().trimEnd('/'),key.text.toString().trim(),pin.text.toString().trim());PcClient.validate(c);savePc(c)}}.show()
++    }
++    private fun savePc(c:PcConfig){pc=c;prefs.edit().putString("pc_connection",gson.toJson(c)).commit();render();log("Подключение к ПК сохранено: ${c.url}")}
++    private fun persist():Boolean=try{store.save(snapshot);true}catch(e:Exception){storageFailure(e);false}
++    private fun storageFailure(e:Exception){
++        halted=true;setContinuousScanMode(false)
++        AlertDialog.Builder(this).setTitle("Сканирование остановлено: ошибка хранения")
++            .setMessage("${e.message}\nНе удаляйте приложение и его данные. Очередь не будет перезаписана пустой.")
++            .setPositiveButton("Понятно",null).show();render()
++    }
++    private fun render(){
++        val j=snapshot.current;val locked=j!=null||halted
++        listOf<View>(b.spinnerProfiles,b.etProfileTitle,b.etInn,b.spinnerEnvironment,b.etSetGtin,b.etComposition,b.btnSaveProfile,b.btnDeleteProfile).forEach{it.isEnabled=!locked}
++        b.tvConnection.text=if(pc.url.isBlank())"ПК не подключён" else "ПК: ${pc.url}"
++        b.tvScanState.text=if(halted)"ОСТАНОВЛЕНО: ошибка сохранения" else if(pairMode)"Сканируйте QR подключения ПК" else if(j==null)"Сканируйте DataMatrix НАБОРА" else "Сканируйте пачки: ${j.children.size} / ${j.template.expected.values.sum()}"
++        b.tvCurrentSet.text=j?.let{"Набор: ${it.setCode}\nИНН ${it.inn} · ${it.environment}"}?:"Текущий набор не открыт"
++        b.tvProgress.text=j?.template?.expected?.entries?.joinToString("\n"){(g,n)->"$g: ${j.children.count{it.substring(2,16)==g}} / $n"}?:"Проверьте шаблон перед сборкой"
++        b.tvTotalCompletedSets.text="Всего в очереди: ${snapshot.jobs.size}; на ТСД: ${snapshot.jobs.count{!it.uploaded}}; подтверждено ЧЗ: ${snapshot.jobs.count{it.status=="VERIFIED"}}"
++        b.btnSendDraft.isEnabled=!networkBusy&&!halted;b.btnRefresh.isEnabled=!networkBusy&&!halted
++        b.tvQueue.text=snapshot.jobs.asReversed().take(100).joinToString("\n\n"){
++            "…${it.setCode.takeLast(6)} · ИНН ${it.inn} · ${it.children.size} шт\n${Labels.status(it.status)}${if(it.detail.isNotBlank())"\n"+it.detail.take(350)else ""}${it.documentId?.let{d->"\nДокумент: $d"}?:""}"
++        }.ifBlank{"Готовых наборов пока нет"}
++    }
++    private fun attempt(block:()->Unit){try{block()}catch(e:Exception){toast(e.message?:"Ошибка");log(e.message?:"Ошибка");if(snapshot.current!=null)mainHandler.postDelayed({if(foreground)startSoftwareScanTrigger()},200)}}
++    private fun toast(message:String){Toast.makeText(this,message,Toast.LENGTH_LONG).show()}
++    private fun log(message:String){
++        val entry="[${SimpleDateFormat("HH:mm:ss",Locale.ROOT).format(Date())}] $message\n"
++        try{if(logFile.length()>1_000_000)logFile.writeText("");logFile.appendText(entry)}catch(e:Exception){}
++        b.tvLog.text=(entry+b.tvLog.text.toString()).take(16000)
++    }
++    private fun share(file:File,mime:String){attempt{
++        require(file.exists()){"Файл пока не создан"}
++        val uri=FileProvider.getUriForFile(this,"$packageName.provider",file)
++        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply{type=mime;putExtra(Intent.EXTRA_STREAM,uri);addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)},"Передать файл себе"))
++    }}
+     private fun setContinuousScanMode(enable: Boolean) {
+         val m3Intent = Intent("com.m3.scan.action.SCANNER_SETTING_CHANGE").apply {
+             putExtra("setting_name", "continuous_scan")
+@@ -252,487 +299,5 @@
+         sendBroadcast(altScanStop)
+     }
+ 
+-    private fun cleanCode(rawCode: String): String {
+-        var code = rawCode.trim()
+-        
+-        if (code.startsWith("]d2") || code.startsWith("]e0") || code.startsWith("]Q3") || code.startsWith("]C1")) {
+-            code = code.substring(3)
+-        }
+-        
+-        val gsIndex = code.indexOf('\u001d')
+-        if (gsIndex != -1) {
+-            code = code.substring(0, gsIndex)
+-        }
+-
+-        val key91Index = code.indexOf("91")
+-        if (key91Index in 21..35) {
+-            code = code.substring(0, key91Index)
+-        }
+-
+-        return code.trim()
+-    }
+-
+-    private fun isChestnyZnakCode(code: String): Boolean {
+-        if (code.matches(Regex("^\\d{8}$")) || code.matches(Regex("^\\d{12,14}$"))) {
+-            return false
+-        }
+-        val isStandardGs1 = code.startsWith("01") && code.length >= 21 && code.substring(2).take(14).all { it.isDigit() }
+-        val isSscc = code.startsWith("00") && code.length == 20 && code.drop(2).all { it.isDigit() }
+-
+-        return isStandardGs1 || isSscc
+-    }
+-
+-    private fun setupKeyAndTextListeners() {
+-        binding.etCountPerSet.addTextChangedListener(object : TextWatcher {
+-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+-
+-            override fun afterTextChanged(s: Editable?) {
+-                val input = s.toString().trim()
+-                if (input.length > 10) {
+-                    binding.etCountPerSet.removeTextChangedListener(this)
+-                    binding.etCountPerSet.setText("6")
+-                    binding.etCountPerSet.addTextChangedListener(this)
+-                    
+-                    processScannedBarcode(input)
+-                }
+-            }
+-        })
+-    }
+-
+-    private fun loadProfilesFromStorage() {
+-        profilesList.clear()
+-        val loadedJson = prefs.getString("profiles_json", null)
+-
+-        if (!loadedJson.isNullOrEmpty()) {
+-            try {
+-                val type = object : TypeToken<List<OrganizationProfile>>() {}.type
+-                val savedList: List<OrganizationProfile> = gson.fromJson(loadedJson, type)
+-                profilesList.addAll(savedList)
+-            } catch (e: Exception) {
+-                log("⚠️ Ошибка JSON профилей")
+-            }
+-        }
+-
+-        if (profilesList.isEmpty()) {
+-            profilesList.add(OrganizationProfile("7700000000", "", "grocery", "Основной профиль"))
+-        }
+-
+-        updateProfilesSpinner()
+-    }
+-
+-    private fun saveProfilesToStorage() {
+-        val json = gson.toJson(profilesList)
+-        prefs.edit().putString("profiles_json", json).apply()
+-        log("💾 Профиль сохранен")
+-    }
+-
+-    private fun updateProfilesSpinner() {
+-        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, profilesList)
+-        binding.spinnerProfiles.adapter = adapter
+-
+-        val lastIndex = prefs.getInt("selected_profile_index", 0)
+-        if (lastIndex < profilesList.size) {
+-            binding.spinnerProfiles.setSelection(lastIndex)
+-            applyProfileToInputs(profilesList[lastIndex])
+-        }
+-    }
+-
+-    private fun applyProfileToInputs(profile: OrganizationProfile) {
+-        binding.etInn.setText(profile.inn)
+-        binding.etToken.setText(profile.token)
+-        val currentPg = if (profile.pg.isEmpty()) "grocery" else profile.pg
+-        binding.etProductGroup.setText(currentPg)
+-
+-        val presetIndex = pgCodes.indexOf(currentPg)
+-        if (presetIndex >= 0) {
+-            binding.spinnerPg.setSelection(presetIndex)
+-        } else {
+-            binding.spinnerPg.setSelection(pgPresets.size - 1)
+-        }
+-    }
+-
+-    private fun setupListeners() {
+-        binding.spinnerProfiles.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+-                selectedProfileIndex = position
+-                prefs.edit().putInt("selected_profile_index", position).apply()
+-                applyProfileToInputs(profilesList[position])
+-            }
+-
+-            override fun onNothingSelected(parent: AdapterView<*>?) {}
+-        }
+-
+-        binding.btnSaveProfile.setOnClickListener {
+-            val inn = binding.etInn.text.toString().trim()
+-            val token = binding.etToken.text.toString().trim()
+-            val pg = binding.etProductGroup.text.toString().trim().ifEmpty { "grocery" }
+-
+-            if (inn.isEmpty()) {
+-                Toast.makeText(this, "Введите ИНН!", Toast.LENGTH_SHORT).show()
+-                return@setOnClickListener
+-            }
+-
+-            val existingIndex = profilesList.indexOfFirst { it.inn == inn }
+-            val newProfile = OrganizationProfile(inn, token, pg)
+-
+-            if (existingIndex >= 0) {
+-                profilesList[existingIndex] = newProfile
+-                Toast.makeText(this, "Профиль $inn обновлен", Toast.LENGTH_SHORT).show()
+-            } else {
+-                profilesList.add(newProfile)
+-                Toast.makeText(this, "Профиль $inn сохранен", Toast.LENGTH_SHORT).show()
+-            }
+-
+-            saveProfilesToStorage()
+-            updateProfilesSpinner()
+-        }
+-
+-        binding.btnDeleteProfile.setOnClickListener {
+-            if (profilesList.size <= 1) {
+-                Toast.makeText(this, "Нельзя удалить единственный профиль!", Toast.LENGTH_SHORT).show()
+-                return@setOnClickListener
+-            }
+-
+-            if (selectedProfileIndex in profilesList.indices) {
+-                val removed = profilesList.removeAt(selectedProfileIndex)
+-                saveProfilesToStorage()
+-                updateProfilesSpinner()
+-                Toast.makeText(this, "Профиль ${removed.inn} удален", Toast.LENGTH_SHORT).show()
+-            }
+-        }
+-
+-        binding.btnResetCurrentSet.setOnClickListener {
+-            if (currentSetCode != null || currentChildrenCodes.isNotEmpty()) {
+-                currentSetCode = null
+-                currentChildrenCodes.clear()
+-                setContinuousScanMode(false)
+-                stopSoftwareScanTrigger()
+-                updateUi()
+-                log("⚠️ Набор сброшен")
+-                Toast.makeText(this, "Набор сброшен.", Toast.LENGTH_SHORT).show()
+-            }
+-        }
+-
+-        binding.btnCheckUpdate.setOnClickListener {
+-            checkInstallPermissionAndDownload()
+-        }
+-
+-        binding.btnShareLog.setOnClickListener {
+-            shareLogFile()
+-        }
+-
+-        binding.btnSendDraft.setOnClickListener {
+-            setContinuousScanMode(false)
+-            stopSoftwareScanTrigger()
+-            sendDraftDirectlyToLk()
+-        }
+-    }
+-
+-    private fun checkInstallPermissionAndDownload() {
+-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+-            if (!packageManager.canRequestPackageInstalls()) {
+-                log("⚠️ Запрос разрешения установки приложений")
+-                Toast.makeText(this, "Разрешите установку обновлений в настройках", Toast.LENGTH_LONG).show()
+-                val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+-                    data = Uri.parse("package:$packageName")
+-                }
+-                startActivity(intent)
+-                return
+-            }
+-        }
+-        startApkDownload()
+-    }
+-
+-    private fun sendDraftDirectlyToLk() {
+-        val inn = binding.etInn.text.toString().trim()
+-        val rawToken = binding.etToken.text.toString().trim()
+-        val pg = binding.etProductGroup.text.toString().trim().ifEmpty { "grocery" }
+-
+-        if (inn.isEmpty() || rawToken.isEmpty()) {
+-            Toast.makeText(this, "Заполните ИНН и Токен!", Toast.LENGTH_SHORT).show()
+-            return
+-        }
+-
+-        val sendUnits = ArrayList(completedSets)
+-        if (currentSetCode != null && currentChildrenCodes.isNotEmpty()) {
+-            sendUnits.add(SetUnit(currentSetCode!!, ArrayList(currentChildrenCodes)))
+-        }
+-
+-        if (sendUnits.isEmpty()) {
+-            Toast.makeText(this, "Нет наборов для отправки!", Toast.LENGTH_SHORT).show()
+-            return
+-        }
+-
+-        val authHeader = if (rawToken.startsWith("Bearer ")) rawToken else "Bearer $rawToken"
+-        val actionId = if (pg == "tobacco" || pg == "otp") 20 else 30
+-        val docType = if (pg == "tobacco" || pg == "otp") "CREATE_SET" else "AGGREGATION_DOCUMENT"
+-
+-        val docStructure = ProductDocumentSet(
+-            actionId = actionId,
+-            inn = inn,
+-            setUnits = sendUnits
+-        )
+-
+-        val rawJsonDoc = gson.toJson(docStructure)
+-        val base64Doc = Base64.encodeToString(rawJsonDoc.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+-
+-        val requestData = SetDraftRequest(
+-            documentFormat = "MANUAL",
+-            type = docType,
+-            productDocument = base64Doc
+-        )
+-
+-        val jsonBody = gson.toJson(requestData)
+-        log("🚀 [v1.2.4] Загрузка черновика в ЛК ЧЗ (pg=$pg, ${sendUnits.size} наборов)...")
+-
+-        CoroutineScope(Dispatchers.IO).launch {
+-            try {
+-                val client = OkHttpClient.Builder()
+-                    .connectTimeout(30, TimeUnit.SECONDS)
+-                    .readTimeout(30, TimeUnit.SECONDS)
+-                    .writeTimeout(30, TimeUnit.SECONDS)
+-                    .retryOnConnectionFailure(true)
+-                    .connectionSpecs(listOf(ConnectionSpec.MODERN_TLS, ConnectionSpec.CLEARTEXT))
+-                    .build()
+-
+-                val url = "https://ismp.crpt.ru/api/v3/true-api/lk/documents/create?pg=$pg"
+-                val mediaType = "application/json; charset=utf-8".toMediaType()
+-
+-                log("📡 POST $url")
+-
+-                val request = Request.Builder()
+-                    .url(url)
+-                    .post(jsonBody.toRequestBody(mediaType))
+-                    .addHeader("Authorization", authHeader)
+-                    .addHeader("Accept", "application/json")
+-                    .addHeader("Content-Type", "application/json; charset=utf-8")
+-                    .build()
+-
+-                val response = client.newCall(request).execute()
+-                val responseCode = response.code
+-                val responseBody = response.body?.string() ?: ""
+-
+-                log("📩 Ответ [$responseCode]: $responseBody")
+-
+-                withContext(Dispatchers.Main) {
+-                    if (response.isSuccessful) {
+-                        val apiResp = try { gson.fromJson(responseBody, CzApiResponse::class.java) } catch (e: Exception) { null }
+-                        val docId = apiResp?.value ?: apiResp?.docNumber ?: apiResp?.documentId ?: "Создан"
+-                        log("✅ ЧЕРНОВИК СОЗДАН В ЛК! (ID: $docId)")
+-                        Toast.makeText(this@MainActivity, "Черновик сохранён в ЛК! Подпишите его на ПК.", Toast.LENGTH_LONG).show()
+-
+-                        completedSets.clear()
+-                        currentSetCode = null
+-                        currentChildrenCodes.clear()
+-                        updateUi()
+-                    } else {
+-                        log("❌ Ошибка ЛК [$responseCode]: $responseBody")
+-                        Toast.makeText(this@MainActivity, "Ошибка: $responseCode", Toast.LENGTH_LONG).show()
+-                    }
+-                }
+-            } catch (e: Exception) {
+-                val err = e.localizedMessage ?: "Сбой соединения"
+-                log("💥 Ошибка сети: $err")
+-                withContext(Dispatchers.Main) {
+-                    Toast.makeText(this@MainActivity, "Сбой сети: $err", Toast.LENGTH_LONG).show()
+-                }
+-            }
+-        }
+-    }
+-
+-    private fun shareLogFile() {
+-        try {
+-            if (!logFile.exists() || logFile.length() == 0L) {
+-                Toast.makeText(this, "Лог пока пуст", Toast.LENGTH_SHORT).show()
+-                return
+-            }
+-
+-            val logUri: Uri = FileProvider.getUriForFile(this, "$packageName.provider", logFile)
+-            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+-                type = "text/plain"
+-                putExtra(Intent.EXTRA_STREAM, logUri)
+-                putExtra(Intent.EXTRA_SUBJECT, "Лог работы ТСД Честный ЗНАК")
+-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+-            }
+-            startActivity(Intent.createChooser(shareIntent, "Отправить лог через..."))
+-        } catch (e: Exception) {
+-            Toast.makeText(this, "Ошибка отправки лога: ${e.message}", Toast.LENGTH_LONG).show()
+-        }
+-    }
+-
+-    private fun startApkDownload() {
+-        val apkUrl = "https://raw.githubusercontent.com/iccentre2-byte/scan_chz/main/app-release.apk"
+-        log("🔄 Старт скачивания: $apkUrl")
+-        Toast.makeText(this, "Загрузка обновления...", Toast.LENGTH_SHORT).show()
+-
+-        try {
+-            val file = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "app-update.apk")
+-            if (file.exists()) file.delete()
+-
+-            val request = DownloadManager.Request(Uri.parse(apkUrl))
+-                .setTitle("Обновление ЧЗ Наборы")
+-                .setDescription("Загрузка новой версии...")
+-                .setDestinationUri(Uri.fromFile(file))
+-                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+-
+-            val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+-            downloadId = dm.enqueue(request)
+-        } catch (e: Exception) {
+-            log("❌ Ошибка запуска скачивания: ${e.message}")
+-            Toast.makeText(this, "Ошибка скачивания: ${e.message}", Toast.LENGTH_LONG).show()
+-        }
+-    }
+-
+-    private fun checkDownloadStatusAndInstall() {
+-        val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+-        val query = DownloadManager.Query().setFilterById(downloadId)
+-        val cursor = dm.query(query)
+-
+-        if (cursor != null && cursor.moveToFirst()) {
+-            val statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+-            val reasonIndex = cursor.getColumnIndex(DownloadManager.COLUMN_REASON)
+-
+-            if (statusIndex != -1) {
+-                val status = cursor.getInt(statusIndex)
+-                if (status == DownloadManager.STATUS_SUCCESSFUL) {
+-                    log("✅ Скачивание завершено! Открытие инсталлера...")
+-                    installDownloadedApk()
+-                } else if (status == DownloadManager.STATUS_FAILED) {
+-                    val reason = if (reasonIndex != -1) cursor.getInt(reasonIndex) else -1
+-                    log("❌ Ошибка скачивания (Код $reason)")
+-                    Toast.makeText(this, "Не удалось скачать APK (Код $reason)", Toast.LENGTH_LONG).show()
+-                }
+-            }
+-            cursor.close()
+-        } else {
+-            log("❌ Загрузка не найдена")
+-        }
+-    }
+-
+-    private fun installDownloadedApk() {
+-        try {
+-            val file = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "app-update.apk")
+-            if (!file.exists() || file.length() == 0L) {
+-                log("❌ Файл обновления не найден!")
+-                Toast.makeText(this, "Файл обновления не найден", Toast.LENGTH_SHORT).show()
+-                return
+-            }
+-
+-            val apkUri = FileProvider.getUriForFile(
+-                this,
+-                "$packageName.provider",
+-                file
+-            )
+-
+-            val intent = Intent(Intent.ACTION_VIEW).apply {
+-                setDataAndType(apkUri, "application/vnd.android.package-archive")
+-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
+-            }
+-
+-            val resInfoList = packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+-            for (resolveInfo in resInfoList) {
+-                val pkgName = resolveInfo.activityInfo.packageName
+-                grantUriPermission(pkgName, apkUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+-            }
+-
+-            startActivity(intent)
+-            log("🚀 Установщик запущен")
+-        } catch (e: Exception) {
+-            log("❌ Ошибка запуска: ${e.message}")
+-            Toast.makeText(this, "Ошибка запуска: ${e.message}", Toast.LENGTH_LONG).show()
+-        }
+-    }
+-
+-    private fun processScannedBarcode(rawBarcode: String) {
+-        val barcode = cleanCode(rawBarcode)
+-        val targetCount = binding.etCountPerSet.text.toString().toIntOrNull() ?: 6
+-
+-        if (!isChestnyZnakCode(barcode)) {
+-            log("⚠️ Отклонено: не код Честного ЗНАКа ($barcode)")
+-            Toast.makeText(this, "Не является кодом Честного ЗНАКа!", Toast.LENGTH_SHORT).show()
+-            if (currentSetCode != null) {
+-                mainHandler.postDelayed({ startSoftwareScanTrigger() }, 200)
+-            }
+-            return
+-        }
+-
+-        log("Скан ЧЗ: $barcode")
+-
+-        if (currentSetCode == null) {
+-            currentSetCode = barcode
+-            currentChildrenCodes.clear()
+-            
+-            setContinuousScanMode(true)
+-            log("📦 НАБОР ОТКРЫТ: $barcode")
+-            Toast.makeText(this, "Набор открыт! Сканируйте пачки подряд", Toast.LENGTH_SHORT).show()
+-        } else {
+-            if (barcode == currentSetCode) {
+-                log("⚠️ Сосканирован код открытого НАБОРА!")
+-                mainHandler.postDelayed({ startSoftwareScanTrigger() }, 200)
+-                return
+-            }
+-
+-            if (currentChildrenCodes.contains(barcode)) {
+-                log("⚠️ Дубликат пачки в наборе!")
+-                Toast.makeText(this, "Пачка уже в наборе!", Toast.LENGTH_SHORT).show()
+-                mainHandler.postDelayed({ startSoftwareScanTrigger() }, 200)
+-                return
+-            }
+-
+-            currentChildrenCodes.add(barcode)
+-            log("-> Пачка (${currentChildrenCodes.size}/$targetCount): $barcode")
+-
+-            if (currentChildrenCodes.size >= targetCount) {
+-                completedSets.add(SetUnit(currentSetCode!!, ArrayList(currentChildrenCodes)))
+-                
+-                setContinuousScanMode(false)
+-                stopSoftwareScanTrigger()
+-
+-                log("✅ НАБОР УКОМПЛЕКТОВАН (${completedSets.size} шт)")
+-                Toast.makeText(this, "Набор закрыт! Сканируйте следующий НАБОР", Toast.LENGTH_SHORT).show()
+-                
+-                currentSetCode = null
+-                currentChildrenCodes.clear()
+-            } else {
+-                mainHandler.postDelayed({
+-                    startSoftwareScanTrigger()
+-                }, 100)
+-            }
+-        }
+-        updateUi()
+-    }
+-
+-    private fun updateUi() {
+-        val targetCount = binding.etCountPerSet.text.toString().toIntOrNull() ?: 6
+-
+-        if (currentSetCode == null) {
+-            binding.tvScanState.text = "СТАТУС: Ожидание сканирования НАБОРА"
+-            binding.tvScanState.setBackgroundColor(0xFFEFF6FF.toInt())
+-            binding.tvCurrentSet.text = "Текущий набор: НЕ ВЫБРАН"
+-            binding.tvProgress.text = "Пачек в наборе: 0 / $targetCount"
+-        } else {
+-            binding.tvScanState.text = "🔥 ПОТОКОВЫЙ РЕЖИМ (Пачка ${currentChildrenCodes.size + 1} из $targetCount)"
+-            binding.tvScanState.setBackgroundColor(0xFFFEF3C7.toInt())
+-            binding.tvCurrentSet.text = "Текущий набор: $currentSetCode"
+-            binding.tvProgress.text = "Пачек в наборе: ${currentChildrenCodes.size} / $targetCount"
+-        }
+-
+-        binding.tvTotalCompletedSets.text = "Закрытых наборов к отправке: ${completedSets.size}"
+-    }
+-
+-    @Synchronized
+-    private fun log(message: String) {
+-        val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+-        val entry = "[$timestamp] $message\n"
+-        
+-        try {
+-            logFile.appendText(entry)
+-        } catch (e: Exception) {}
+-
+-        runOnUiThread {
+-            val currentText = binding.tvLog.text.toString()
+-            binding.tvLog.text = "$entry$currentText"
+-        }
+-    }
++
+ }
+--- /dev/null
++++ b/app/src/main/java/com/tsd/czsetcollector/PcClient.kt
+@@ -0,0 +1,72 @@
++package com.tsd.czsetcollector
++
++import com.google.gson.Gson
++import okhttp3.OkHttpClient
++import okhttp3.Request
++import okhttp3.MediaType.Companion.toMediaType
++import okhttp3.RequestBody.Companion.toRequestBody
++import java.net.URI
++import java.security.MessageDigest
++import java.security.SecureRandom
++import java.security.cert.X509Certificate
++import java.security.cert.CertificateException
++import java.util.concurrent.TimeUnit
++import javax.net.ssl.SSLContext
++import javax.net.ssl.X509TrustManager
++
++/** Trust ONLY the exact certificate paired on the PC screen; not a trust-all manager. */
++class PcClient(private val config:PcConfig) {
++    companion object {
++        fun validate(c:PcConfig) {
++            val u=URI(c.url)
++            require(u.scheme=="https" && u.userInfo==null && u.query==null && u.fragment==null &&
++                (u.path.isNullOrEmpty()||u.path=="/") && u.port in 1..65535){"Нужен адрес вида https://192.168.1.10:18765"}
++            val octets=(u.host?:"").split('.').map{it.toIntOrNull()?:-1}
++            require(octets.size==4 && octets.all{it in 0..255} && (octets[0]==10 ||
++                octets[0]==192&&octets[1]==168 || octets[0]==172&&octets[1] in 16..31)) {"Используйте локальный IPv4 ПК, не публичный сервер"}
++            require(c.pin.matches(Regex("[a-fA-F0-9]{64}"))){"Проверьте SHA-256 сертификата ПК: 64 символа"}
++            require(c.key.matches(Regex("[A-Za-z0-9_-]{32,128}"))){"Проверьте ключ подключения к ПК"}
++        }
++        private fun fingerprint(cert:X509Certificate)=MessageDigest.getInstance("SHA-256").digest(cert.encoded)
++            .joinToString(""){"%02x".format(it.toInt() and 255)}
++    }
++    private val gson=Gson()
++    private val client:OkHttpClient
++    init {
++        validate(config)
++        val trust=object:X509TrustManager {
++            override fun getAcceptedIssuers():Array<X509Certificate> = emptyArray()
++            override fun checkClientTrusted(chain:Array<X509Certificate>,authType:String) {throw CertificateException("Not a server")}
++            override fun checkServerTrusted(chain:Array<X509Certificate>,authType:String) {
++                if(chain.isEmpty())throw CertificateException("No server certificate")
++                chain[0].checkValidity()
++                if(!fingerprint(chain[0]).equals(config.pin,true))throw CertificateException("Сертификат ПК изменился. Сверьте QR на ПК")
++            }
++        }
++        val ssl=SSLContext.getInstance("TLS");ssl.init(null,arrayOf(trust),SecureRandom())
++        client=OkHttpClient.Builder().sslSocketFactory(ssl.socketFactory,trust)
++            .hostnameVerifier{host,session -> host==URI(config.url).host &&
++                try {fingerprint(session.peerCertificates[0] as X509Certificate).equals(config.pin,true)}catch(e:Exception){false}}
++            .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
++            .connectTimeout(10,TimeUnit.SECONDS).readTimeout(20,TimeUnit.SECONDS).writeTimeout(20,TimeUnit.SECONDS).build()
++    }
++    private fun call(path:String,body:String?=null):String {
++        val b=Request.Builder().url(config.url.trimEnd('/')+path).header("Authorization","Bearer "+config.key).header("Accept","application/json")
++        if(body==null)b.get() else b.post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
++        client.newCall(b.build()).execute().use {r ->
++            val bytes=r.body?.byteStream()?.use{stream ->
++                val out=java.io.ByteArrayOutputStream();val buffer=ByteArray(8192);var n=stream.read(buffer)
++                while(n>=0){out.write(buffer,0,n);require(out.size()<=2_000_000){"Слишком большой ответ ПК"};n=stream.read(buffer)};out.toByteArray()
++            }?:ByteArray(0)
++            val text=String(bytes,Charsets.UTF_8)
++            if(!r.isSuccessful){
++                val detail=try{gson.fromJson(text,com.google.gson.JsonObject::class.java).get("error")?.asString?:text}catch(e:Exception){text}
++                throw IllegalStateException("ПК HTTP ${r.code}: ${detail.take(600)}")
++            }
++            return text
++        }
++    }
++    fun ping(){call("/v1/ping")}
++    fun upload(job:Job):Job=gson.fromJson(call("/v1/jobs",gson.toJson(job)),Job::class.java)
++    fun status(id:String):Job {java.util.UUID.fromString(id);return gson.fromJson(call("/v1/jobs/$id"),Job::class.java)}
++}
+--- /dev/null
++++ b/app/src/main/java/com/tsd/czsetcollector/QueueStore.kt
+@@ -0,0 +1,38 @@
++package com.tsd.czsetcollector
++
++import android.util.AtomicFile
++import com.google.gson.Gson
++import java.io.File
++
++/** AtomicFile retains the previous file if the app/device stops during a write. */
++class QueueStore(dir:File) {
++    private val file=AtomicFile(File(dir,"queue-v1.json"))
++    private val gson=Gson()
++    fun load():Snapshot {
++        if(!file.baseFile.exists()&&!File(file.baseFile.path+".bak").exists())return Snapshot()
++        val raw=String(file.readFully(),Charsets.UTF_8)
++        val root=com.google.gson.JsonParser.parseString(raw)
++        require(root.isJsonObject && root.asJsonObject.has("jobs") && root.asJsonObject.get("jobs").isJsonArray){"Неполный/повреждённый файл очереди"}
++        val snapshot=gson.fromJson(raw,Snapshot::class.java) ?: throw IllegalStateException("Файл очереди пуст/повреждён")
++        requireNotNull(snapshot.jobs){"Повреждён список заданий"}
++        val all=snapshot.jobs.toList()+listOfNotNull(snapshot.current)
++        require(all.map{it.id}.toSet().size==all.size){"Повтор идентификатора задания в файле"}
++        for(j in all){
++            java.util.UUID.fromString(j.id)
++            require(j.schemaVersion==1 && j.environment in setOf("production","sandbox") && j.pg=="grocery" && Codes.inn(j.inn)){"Неподдерживаемое задание в очереди"}
++            require(Codes.normalize(j.setCode)==j.setCode && j.setCode.substring(2,16)==j.template.setGtin){"Повреждён код набора"}
++            val expected=Codes.composition(j.template.expected.entries.joinToString("\n"){"${it.key}=${it.value}"})
++            require(j.children.distinct().size==j.children.size && j.setCode !in j.children){"Повтор кода в наборе"}
++            require(j.children.all{Codes.normalize(it)==it && expected.containsKey(it.substring(2,16))}){"Повреждены вложения"}
++            val actual=j.children.groupingBy{it.substring(2,16)}.eachCount()
++            require(actual.all{(g,n)->n <= (expected[g]?:0)}){"Превышен состав набора"}
++            require(j===snapshot.current || actual==expected){"В очереди есть недоукомплектованный набор"}
++        }
++        return snapshot
++    }
++    fun save(snapshot:Snapshot) {
++        val stream=file.startWrite()
++        try {stream.write(gson.toJson(snapshot).toByteArray(Charsets.UTF_8));file.finishWrite(stream)}
++        catch(e:Exception){file.failWrite(stream);throw e}
++    }
++}
+--- a/app/src/main/res/layout/activity_main.xml
++++ b/app/src/main/res/layout/activity_main.xml
+@@ -1,329 +1,35 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+-    xmlns:app="http://schemas.android.com/apk/res-auto"
+-    android:layout_width="match_parent"
+-    android:layout_height="match_parent"
+-    android:orientation="vertical"
+-    android:background="#F8FAFC"
+-    android:padding="12dp">
+-
+-    <!-- Заголовок и кнопка обновления -->
+-    <LinearLayout
+-        android:layout_width="match_parent"
+-        android:layout_height="wrap_content"
+-        android:orientation="horizontal"
+-        android:gravity="center_vertical"
+-        android:paddingBottom="8dp">
+-
+-        <TextView
+-            android:layout_width="0dp"
+-            android:layout_height="wrap_content"
+-            android:layout_weight="1"
+-            android:text="ЧЗ: Сборка Наборов"
+-            android:textSize="18sp"
+-            android:textStyle="bold"
+-            android:textColor="#0F172A" />
+-
+-        <Button
+-            android:id="@+id/btnCheckUpdate"
+-            android:layout_width="wrap_content"
+-            android:layout_height="wrap_content"
+-            android:text="Обновить"
+-            android:textSize="11sp"
+-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+-            android:layout_marginEnd="6dp"/>
+-
+-        <TextView
+-            android:id="@+id/tvAppVersion"
+-            android:layout_width="wrap_content"
+-            android:layout_height="wrap_content"
+-            android:text="v1.1.1"
+-            android:textSize="12sp"
+-            android:textStyle="bold"
+-            android:textColor="#FFFFFF"
+-            android:background="#2563EB"
+-            android:paddingHorizontal="8dp"
+-            android:paddingVertical="4dp" />
+-    </LinearLayout>
+-
+-    <ScrollView
+-        android:layout_width="match_parent"
+-        android:layout_height="0dp"
+-        android:layout_weight="1"
+-        android:fillViewport="true">
+-
+-        <LinearLayout
+-            android:layout_width="match_parent"
+-            android:layout_height="wrap_content"
+-            android:orientation="vertical">
+-
+-            <!-- Профиль -->
+-            <com.google.android.material.card.MaterialCardView
+-                android:layout_width="match_parent"
+-                android:layout_height="wrap_content"
+-                app:cardCornerRadius="8dp"
+-                app:cardElevation="2dp"
+-                android:layout_marginBottom="8dp">
+-
+-                <LinearLayout
+-                    android:layout_width="match_parent"
+-                    android:layout_height="wrap_content"
+-                    android:orientation="vertical"
+-                    android:padding="10dp">
+-
+-                    <TextView
+-                        android:layout_width="wrap_content"
+-                        android:layout_height="wrap_content"
+-                        android:text="1. Профиль организации"
+-                        android:textStyle="bold"
+-                        android:textColor="#0F172A"
+-                        android:layout_marginBottom="6dp"/>
+-
+-                    <Spinner
+-                        android:id="@+id/spinnerProfiles"
+-                        android:layout_width="match_parent"
+-                        android:layout_height="44dp"
+-                        android:layout_marginBottom="6dp"/>
+-
+-                    <com.google.android.material.textfield.TextInputLayout
+-                        android:layout_width="match_parent"
+-                        android:layout_height="wrap_content"
+-                        android:hint="ИНН организации"
+-                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.Dense">
+-                        <com.google.android.material.textfield.TextInputEditText
+-                            android:id="@+id/etInn"
+-                            android:layout_width="match_parent"
+-                            android:layout_height="wrap_content"
+-                            android:inputType="number" />
+-                    </com.google.android.material.textfield.TextInputLayout>
+-
+-                    <com.google.android.material.textfield.TextInputLayout
+-                        android:layout_width="match_parent"
+-                        android:layout_height="wrap_content"
+-                        android:hint="Bearer Token (из ЛК ЧЗ)"
+-                        android:layout_marginTop="4dp"
+-                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.Dense">
+-                        <com.google.android.material.textfield.TextInputEditText
+-                            android:id="@+id/etToken"
+-                            android:layout_width="match_parent"
+-                            android:layout_height="wrap_content"
+-                            android:inputType="text" />
+-                    </com.google.android.material.textfield.TextInputLayout>
+-
+-                    <TextView
+-                        android:layout_width="wrap_content"
+-                        android:layout_height="wrap_content"
+-                        android:text="Товарная группа ЧЗ (pg):"
+-                        android:textSize="12sp"
+-                        android:textColor="#475569"
+-                        android:layout_marginTop="6dp"
+-                        android:layout_marginBottom="2dp"/>
+-
+-                    <Spinner
+-                        android:id="@+id/spinnerPg"
+-                        android:layout_width="match_parent"
+-                        android:layout_height="44dp"
+-                        android:layout_marginBottom="4dp"/>
+-
+-                    <com.google.android.material.textfield.TextInputLayout
+-                        android:layout_width="match_parent"
+-                        android:layout_height="wrap_content"
+-                        android:hint="Свой код pg"
+-                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.Dense">
+-                        <com.google.android.material.textfield.TextInputEditText
+-                            android:id="@+id/etProductGroup"
+-                            android:layout_width="match_parent"
+-                            android:layout_height="wrap_content"
+-                            android:inputType="text"
+-                            android:text="grocery" />
+-                    </com.google.android.material.textfield.TextInputLayout>
+-
+-                    <LinearLayout
+-                        android:layout_width="match_parent"
+-                        android:layout_height="wrap_content"
+-                        android:orientation="horizontal"
+-                        android:layout_marginTop="6dp">
+-
+-                        <Button
+-                            android:id="@+id/btnSaveProfile"
+-                            android:layout_width="0dp"
+-                            android:layout_height="wrap_content"
+-                            android:layout_weight="1"
+-                            android:text="Сохранить"
+-                            style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
+-
+-                        <Button
+-                            android:id="@+id/btnDeleteProfile"
+-                            android:layout_width="0dp"
+-                            android:layout_height="wrap_content"
+-                            android:layout_weight="1"
+-                            android:layout_marginStart="6dp"
+-                            android:text="Удалить"
+-                            android:textColor="#DC2626"
+-                            style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
+-                    </LinearLayout>
+-
+-                </LinearLayout>
+-            </com.google.android.material.card.MaterialCardView>
+-
+-            <!-- Шаблон -->
+-            <com.google.android.material.card.MaterialCardView
+-                android:layout_width="match_parent"
+-                android:layout_height="wrap_content"
+-                app:cardCornerRadius="8dp"
+-                app:cardElevation="2dp"
+-                android:layout_marginBottom="8dp">
+-
+-                <LinearLayout
+-                    android:layout_width="match_parent"
+-                    android:layout_height="wrap_content"
+-                    android:orientation="vertical"
+-                    android:padding="10dp">
+-
+-                    <TextView
+-                        android:layout_width="wrap_content"
+-                        android:layout_height="wrap_content"
+-                        android:text="2. Шаблон комплектации"
+-                        android:textStyle="bold"
+-                        android:textColor="#0F172A"
+-                        android:layout_marginBottom="6dp"/>
+-
+-                    <com.google.android.material.textfield.TextInputLayout
+-                        android:layout_width="match_parent"
+-                        android:layout_height="wrap_content"
+-                        android:hint="Количество пачек в одном наборе"
+-                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.Dense">
+-                        <com.google.android.material.textfield.TextInputEditText
+-                            android:id="@+id/etCountPerSet"
+-                            android:layout_width="match_parent"
+-                            android:layout_height="wrap_content"
+-                            android:inputType="number"
+-                            android:text="6" />
+-                    </com.google.android.material.textfield.TextInputLayout>
+-                </LinearLayout>
+-            </com.google.android.material.card.MaterialCardView>
+-
+-            <!-- Статус -->
+-            <com.google.android.material.card.MaterialCardView
+-                android:layout_width="match_parent"
+-                android:layout_height="wrap_content"
+-                app:cardCornerRadius="8dp"
+-                app:cardElevation="2dp"
+-                android:layout_marginBottom="8dp">
+-
+-                <LinearLayout
+-                    android:layout_width="match_parent"
+-                    android:layout_height="wrap_content"
+-                    android:orientation="vertical"
+-                    android:padding="10dp">
+-
+-                    <TextView
+-                        android:id="@+id/tvScanState"
+-                        android:layout_width="match_parent"
+-                        android:layout_height="wrap_content"
+-                        android:text="СТАТУС: Отсканируйте DataMatrix НАБОРА"
+-                        android:textStyle="bold"
+-                        android:textSize="13sp"
+-                        android:textColor="#1D4ED8"
+-                        android:background="#EFF6FF"
+-                        android:padding="6dp"/>
+-
+-                    <TextView
+-                        android:id="@+id/tvCurrentSet"
+-                        android:layout_width="match_parent"
+-                        android:layout_height="wrap_content"
+-                        android:text="Текущий набор: НЕ ВЫБРАН"
+-                        android:textColor="#334155"
+-                        android:layout_marginTop="6dp"/>
+-
+-                    <TextView
+-                        android:id="@+id/tvProgress"
+-                        android:layout_width="match_parent"
+-                        android:layout_height="wrap_content"
+-                        android:text="Пачек в наборе: 0 / 6"
+-                        android:textSize="15sp"
+-                        android:textStyle="bold"
+-                        android:textColor="#047857"
+-                        android:layout_marginTop="2dp"/>
+-
+-                    <TextView
+-                        android:id="@+id/tvTotalCompletedSets"
+-                        android:layout_width="match_parent"
+-                        android:layout_height="wrap_content"
+-                        android:text="Закрытых наборов к отправке: 0"
+-                        android:textStyle="bold"
+-                        android:textColor="#0F172A"
+-                        android:layout_marginTop="2dp"/>
+-
+-                    <Button
+-                        android:id="@+id/btnResetCurrentSet"
+-                        android:layout_width="match_parent"
+-                        android:layout_height="wrap_content"
+-                        android:text="Сбросить текущий набор"
+-                        android:layout_marginTop="6dp"
+-                        android:textColor="#DC2626"
+-                        style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
+-
+-                </LinearLayout>
+-            </com.google.android.material.card.MaterialCardView>
+-
+-            <Button
+-                android:id="@+id/btnSendDraft"
+-                android:layout_width="match_parent"
+-                android:layout_height="wrap_content"
+-                android:text="ЗАКРЫТЬ НАБОРЫ И ОТПРАВИТЬ ЧЕРНОВИК В ЧЗ"
+-                android:backgroundTint="#047857"
+-                android:padding="10dp"
+-                android:textStyle="bold" />
+-
+-        </LinearLayout>
+-    </ScrollView>
+-
+-    <!-- Окно лога и кнопка Поделиться -->
+-    <LinearLayout
+-        android:layout_width="match_parent"
+-        android:layout_height="wrap_content"
+-        android:orientation="vertical"
+-        android:layout_marginTop="8dp">
+-
+-        <LinearLayout
+-            android:layout_width="match_parent"
+-            android:layout_height="wrap_content"
+-            android:orientation="horizontal"
+-            android:gravity="center_vertical"
+-            android:layout_marginBottom="4dp">
+-
+-            <TextView
+-                android:layout_width="0dp"
+-                android:layout_height="wrap_content"
+-                android:layout_weight="1"
+-                android:text="Лог работы:"
+-                android:textSize="12sp"
+-                android:textStyle="bold"
+-                android:textColor="#475569"/>
+-
+-            <Button
+-                android:id="@+id/btnShareLog"
+-                android:layout_width="wrap_content"
+-                android:layout_height="36dp"
+-                android:text="Поделиться логом"
+-                android:textSize="11sp"
+-                style="@style/Widget.MaterialComponents.Button.OutlinedButton"/>
+-        </LinearLayout>
+-
+-        <TextView
+-            android:id="@+id/tvLog"
+-            android:layout_width="match_parent"
+-            android:layout_height="130dp"
+-            android:background="#0F172A"
+-            android:textColor="#34D399"
+-            android:fontFamily="monospace"
+-            android:textSize="11sp"
+-            android:padding="8dp"
+-            android:scrollbars="vertical"
+-            android:fadeScrollbars="false"
+-            android:text="--- Лог работы ТСД v1.1.1 ---\n"/>
+-
+-    </LinearLayout>
+-
+-</LinearLayout>
++<ScrollView xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:fillViewport="true">
++<LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="14dp">
++<TextView android:id="@+id/tvAppVersion" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="ЧЗ: Наборы" android:textSize="18sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<TextView android:id="@+id/tvConnection" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="ПК не подключён" android:textSize="14sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<Button android:id="@+id/btnConnectPc" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Подключить ПК / QR" android:minHeight="48dp"/>
++<TextView android:id="@+id/tvProfileHeader" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="1. Организация и шаблон" android:textSize="18sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<Spinner android:id="@+id/spinnerProfiles" android:layout_width="match_parent" android:layout_height="48dp"/>
++<EditText android:id="@+id/etProfileTitle" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Название профиля: Кириешки 6 / ИП" android:inputType="text" android:minLines="1" android:minHeight="48dp" android:gravity="top|start"/>
++<EditText android:id="@+id/etInn" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="ИНН организации или ИП" android:inputType="number" android:minLines="1" android:minHeight="48dp" android:gravity="top|start"/>
++<Spinner android:id="@+id/spinnerEnvironment" android:layout_width="match_parent" android:layout_height="48dp"/>
++<TextView android:id="@+id/tvProductGroup" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Товарная группа: grocery — сухарики и майонезы. ОСУ." android:textSize="14sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<EditText android:id="@+id/etSetGtin" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="GTIN самого набора: 14 цифр" android:inputType="number" android:minLines="1" android:minHeight="48dp" android:gravity="top|start"/>
++<TextView android:id="@+id/tvCompositionHint" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Состав из карточки набора в Национальном каталоге. Каждая строка: GTIN=количество. Например: 04607010740016=1" android:textSize="14sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<EditText android:id="@+id/etComposition" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="GTIN=количество, каждый GTIN с новой строки" android:inputType="textMultiLine|textNoSuggestions" android:minLines="4" android:minHeight="48dp" android:gravity="top|start"/>
++<Button android:id="@+id/btnSaveProfile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сохранить профиль и состав" android:minHeight="48dp"/>
++<Button android:id="@+id/btnDeleteProfile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Удалить выбранный профиль" android:minHeight="48dp"/>
++<TextView android:id="@+id/tvScanHeader" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="2. Сборка набора" android:textSize="18sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<TextView android:id="@+id/tvScanState" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сканируйте код набора" android:textSize="17sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<TextView android:id="@+id/tvCurrentSet" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Текущий набор не открыт" android:textSize="14sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<TextView android:id="@+id/tvProgress" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Пачек: 0" android:textSize="14sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<EditText android:id="@+id/etScanInput" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Поле сканера в режиме клавиатуры" android:inputType="textNoSuggestions" android:minLines="1" android:minHeight="48dp" android:gravity="top|start"/>
++<Button android:id="@+id/btnScan" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сканировать / фокус в поле сканера" android:minHeight="48dp"/>
++<Button android:id="@+id/btnResetCurrentSet" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сбросить только текущий незавершённый набор" android:minHeight="48dp"/>
++<TextView android:id="@+id/tvQueueHeader" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="3. Очередь и передача" android:textSize="18sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<TextView android:id="@+id/tvTotalCompletedSets" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Готовых наборов: 0" android:textSize="14sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<Button android:id="@+id/btnSendDraft" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Передать готовые наборы на ПК" android:minHeight="48dp"/>
++<Button android:id="@+id/btnRefresh" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Обновить статусы с ПК" android:minHeight="48dp"/>
++<TextView android:id="@+id/tvNoSignature" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="На ПК проверьте состав и нажмите «Подписать и отправить в ЧЗ». Без подтверждения наборы остаются в очереди." android:textSize="14sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<TextView android:id="@+id/tvQueue" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Очередь пуста" android:textSize="14sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++<Button android:id="@+id/btnBackup" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Экспорт резервной копии очереди" android:minHeight="48dp"/>
++<Button android:id="@+id/btnCheckUpdate" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Об обновлении приложения" android:minHeight="48dp"/>
++<Button android:id="@+id/btnShareLog" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Поделиться журналом" android:minHeight="48dp"/>
++<TextView android:id="@+id/tvLog" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Журнал работы" android:textSize="12sp" android:paddingTop="7dp" android:paddingBottom="7dp" android:textIsSelectable="true"/>
++</LinearLayout></ScrollView>--- /dev/null
++++ b/app/src/test/java/com/tsd/czsetcollector/DomainTests.kt
+@@ -0,0 +1,19 @@
++package com.tsd.czsetcollector
++import org.junit.Assert.*
++import org.junit.Test
++
++class DomainTests {
++    private val gtin="04607010740016"
++    private val code="01${gtin}215w02o2iH/agzq"
++    @Test fun groceryNormalization(){assertEquals(code,Codes.normalize("]d2"+code+"\u001d93ABCD"))}
++    @Test fun serialWith91(){val x="01${gtin}21ab91cdEF?%123";assertEquals(x,Codes.normalize(x+"\u001d91SIGN"))}
++    @Test fun composition(){assertEquals(mapOf(gtin to 6),Codes.composition("$gtin=6"))}
++    @Test(expected=IllegalArgumentException::class) fun duplicateGtin(){Codes.composition("$gtin=3\n$gtin=3")}
++    @Test(expected=IllegalArgumentException::class) fun zeroQty(){Codes.composition("$gtin=0")}
++    @Test(expected=IllegalArgumentException::class) fun ssccIsNotSet(){Codes.normalize("00"+"0".repeat(18))}
++    @Test fun checksums(){assertTrue(Codes.gtin(gtin));assertTrue(Codes.inn("7707083893"));assertFalse(Codes.inn("7700000000"))}
++    @Test fun independentLists(){val a=Job();val b=Job();a.children.add(code);assertTrue(b.children.isEmpty());assertNotEquals(a.id,b.id)}
++    @Test fun pcUrlValidation(){PcClient.validate(PcConfig("https://192.168.1.2:18765","k".repeat(43),"a".repeat(64)))}
++    @Test(expected=IllegalArgumentException::class) fun rejectPublicPc(){PcClient.validate(PcConfig("https://8.8.8.8:18765","k".repeat(43),"a".repeat(64)))}
++    @Test(expected=IllegalArgumentException::class) fun rejectUnencryptedPc(){PcClient.validate(PcConfig("http://192.168.1.2:18765","k".repeat(43),"a".repeat(64)))}
++}
+--- /dev/null
++++ b/companion_pc/Firewall_PRIVATE.cmd
+@@ -0,0 +1,8 @@
++@echo off
++chcp 65001 >nul
++echo Эта команда открывает входящий TCP 18765 только в частной локальной сети.
++echo Запускать от администратора только если ТСД не подключается.
++choice /c YN /m "Разрешить подключение ТСД (Y/N)?"
++if errorlevel 2 exit /b 0
++netsh advfirewall firewall add rule name="CHZ Set Collector LAN" dir=in action=allow protocol=TCP localport=18765 profile=private remoteip=localsubnet
++pause
+--- /dev/null
++++ b/companion_pc/README_PC_RU.md
+@@ -0,0 +1,74 @@
++# Помощник подписи на ПК — 1.3.0-rc1
++
++## Установка исходной версии
++
++Нужен Windows с работающей КЭП, КриптоПро CSP и зарегистрированным компонентом КриптоПро ЭЦП (CAdESCOM), а также Python 3.11 или новее. Сертификат с доступным закрытым ключом должен быть установлен у текущего пользователя Windows в «Личное». Полномочия сертификата должны позволять работу с выбранным ИНН в ЧЗ. При работе сотрудника нужна корректная МЧД и права в системе; помощник их не выдаёт.
++
++Распаковать папку в обычное место, например `C:\CHZ_SetCollector`. Не запускать прямо из ZIP. Открыть `Start_PC.cmd` двойным щелчком. Первый запуск создаёт локальное Python-окружение `.venv` и устанавливает зависимости из `requirements.txt`; для этого нужен интернет. Обычный запуск не требует прав администратора.
++
++Скрипт открывает браузер с локальной панелью. Не закрывать консоль во время работы. Для остановки нажать Ctrl+C в консоли, когда отправка завершена. Программа не устанавливает службу или автозапуск Windows.
++
++Если в этой же папке есть собранный `CHZ_PC_Helper.exe`, Start_PC.cmd запускает его; отдельный Python тогда не нужен. EXE в исходном комплекте отсутствует, способ сборки описан ниже.
++
++## Подключение ТСД
++
++Панель подписи доступна только на самом ПК: `http://127.0.0.1:18766/` с секретом в начальной ссылке из консоли. По голому адресу без секрета данные не открываются.
++
++Приёмник ТСД работает по `https://локальный_IP:18765`. Только частные адреса 10.*, 172.16–31.* или 192.168.*. По сети доступны передача набора и чтение его статуса, но НЕ подписание, вход в ЧЗ, отмена или отправка в ЧЗ.
++
++На странице нажать «Показать подключение / QR», выбрать сетевой адрес ПК, отсканировать QR через меню подключения Android. Проверить адрес и SHA-256 на обоих устройствах. Используется шифрованное соединение с проверкой конкретного сертификата помощника; защита TLS глобально не отключается.
++
++QR подключения не является кодом маркировки. Он содержит секрет доступа к очереди и не должен попасть в публичный скриншот. Программа не размещает этот QR на внешнем сервисе. При необходимости адрес/ключ/отпечаток можно ввести вручную.
++
++Если QR показывает не тот адрес из нескольких сетевых карт, выбрать другой в списке. Можно запустить `Start_PC.cmd --advertise 192.168.1.10`, подставив действительный локальный IP. При изменении IP ПК переподключить ТСД; желательно закрепить IP на роутере.
++
++Если мешает брандмауэр, `Firewall_PRIVATE.cmd` после отдельного подтверждения открывает TCP 18765 только для частной сети и локальной подсети. Этот скрипт запускается от администратора отдельно. НЕ открывать порт 18766 в сеть, не настраивать проброс портов роутера и не отключать весь брандмауэр.
++
++## Подпись
++
++Выбрать действующий сертификат, отметить наборы одного ИНН и контура, проверить состав и подтвердить кнопку «Подписать и отправить выбранные в ЧЗ».
++
++Помощник запрашивает случайную строку ЧЗ и подписывает её для входа, затем подписывает каждый документ формирования набора откреплённой подписью CAdES-BES. Подписываются точные байты JSON UTF-8. Подпись проверяется компонентом CAdESCOM перед передачей серверу.
++
++Закрытый ключ и PIN не читаются Python-кодом и не экспортируются. Окно PIN вызывает криптопровайдер. Его собственные настройки кеширования PIN остаются вне управления помощником.
++
++Нажатие «Проверить выбранные в ЧЗ» может потребовать входа по КЭП, но не повторяет отправку документа формирования. Автоматическое чтение статусов после отправки использует уже полученную сессию и не вызывает новую подпись.
++
++## Данные
++
++По умолчанию: `%LOCALAPPDATA%\CHZSetCollector`.
++
++- `queue.sqlite3`, `queue.sqlite3-wal`, `queue.sqlite3-shm` — очередь/журнал. Не удалять рабочие файлы.
++- `connection.json` — ключ подключения ТСД, порты.
++- `tls.crt`, `tls.key` — сертификат и ключ шифрования соединения помощника. Это НЕ КЭП ЧЗ.
++- `backup-*.sqlite3` — согласованные резервные копии очереди, созданные кнопкой.
++
++Не копировать только queue.sqlite3 во время работы: последние записи могут быть в WAL. Использовать кнопку резервного копирования. Для восстановления остановить помощник, сохранить исходную папку целиком и восстанавливать согласованную копию со специалистом. Не удалять очередь для обхода запрета повторной отправки.
++
++## Ошибки
++
++«Набор должен быть Нанесён»: проверить отчёт о нанесении в СУЗ, не заказывать замену автоматически.
++
++«Пачка уже вложена в другой агрегат»: выяснить текущее состояние агрегации. Эта версия не делает разагрегацию сама.
++
++CAdESCOM не зарегистрирован: установить/восстановить компонент КриптоПро ЭЦП подходящей разрядности; помощник запускает стандартный PowerShell Windows. Одного CSP может быть недостаточно.
++
++Сертификат не найден: проверить установку в Личное текущего пользователя, носитель, срок и доступность закрытого ключа.
++
++401/403 от ЧЗ: проверить права, ИНН, сертификат/МЧД и контур. Не менять токены вручную на Android: там они не используются.
++
++«Результат неизвестен»: не повторять POST и не создавать новый локальный набор из тех же кодов. Нажать проверку, сверить документы в ЛК ЧЗ. При неизвестном результате помощник намеренно не считает операцию ни успешной, ни безопасной для повтора.
++
++## Сборка EXE на Windows
++
++Из корня проекта сначала выполнить тесты:
++
++```bat
++py -3 -m pip install -r companion_pc\requirements.txt
++py -3 -m unittest discover -s tests -v
++cd companion_pc
++py -3 -m pip install pyinstaller==6.22.3
++py -3 -m PyInstaller --clean --noconfirm --onefile --name CHZ_PC_Helper --hidden-import qrcode.image.svg --collect-all cryptography --add-data "web:web" --add-data "signer.ps1:." server.py
++```
++
++Файл появится в `dist`. К нему приложить Start_PC.cmd, Firewall_PRIVATE.cmd и этот README. Сборка EXE и проверка КЭП на Windows в текущей среде НЕ выполнялись.
+--- /dev/null
++++ b/companion_pc/Start_PC.cmd
+@@ -0,0 +1,35 @@
++@echo off
++chcp 65001 >nul
++cd /d "%~dp0"
++if exist "CHZ_PC_Helper.exe" (
++  CHZ_PC_Helper.exe %*
++  if errorlevel 1 goto error
++  pause
++  exit /b 0
++)
++where py >nul 2>&1
++if errorlevel 1 (
++  echo Нужен Python 3.11 или новее для Windows. Установите его с python.org.
++  pause
++  exit /b 1
++)
++if not exist ".venv\Scripts\python.exe" (
++  py -3 -c "import sys; assert sys.version_info >= (3,11), 'Required Python 3.11+'"
++  if errorlevel 1 goto error
++  py -3 -m venv .venv
++  if errorlevel 1 goto error
++)
++.venv\Scripts\python.exe -c "import cryptography,qrcode" >nul 2>&1
++if errorlevel 1 (
++  .venv\Scripts\python.exe -m pip install -r requirements.txt
++  if errorlevel 1 goto error
++)
++.venv\Scripts\python.exe server.py %*
++if errorlevel 1 goto error
++pause
++exit /b 0
++:error
++echo Ошибка запуска. Скопируйте текст ошибки из этого окна.
++echo Не удаляйте папку данных CHZSetCollector и файл queue.sqlite3.
++pause
++exit /b 1
+--- /dev/null
++++ b/companion_pc/core.py
+@@ -0,0 +1,390 @@
++"""Set formation for grocery goods. No signing or network action on import/upload.
++Contract: True API §§1.5, 4.1.1, 4.1.2.4; read-only doc info v4.
++"""
++from __future__ import annotations
++import base64
++import collections
++from contextlib import contextmanager, closing
++import hashlib
++import json
++import re
++import sqlite3
++import threading
++import time
++import uuid
++from pathlib import Path
++from typing import Any
++from urllib import request, error, parse
++
++VERSION = '1.3.0-rc1'
++HOSTS = {'production': 'https://markirovka.crpt.ru',
++         'sandbox': 'https://markirovka.sandbox.crptech.ru'}
++MAX_BYTES = 2_000_000
++STATES = {'WAITING_SIGNATURE','SUBMITTING','SUBMITTED','PROCESSING',
++          'VERIFIED','REJECTED','UNKNOWN','BLOCKED','CHECK_REQUIRED','CANCELLED_LOCAL'}
++STATUS_RU = {'WAITING_SIGNATURE':'Ожидает подписи на ПК', 'SUBMITTING':'Отправляется',
++             'SUBMITTED':'Передан в ЧЗ', 'PROCESSING':'Обрабатывается в ЧЗ',
++             'VERIFIED':'Сформирован: состав проверен', 'REJECTED':'Отклонён ЧЗ',
++             'UNKNOWN':'Результат отправки неизвестен — НЕ повторять',
++             'BLOCKED':'Не отправлен: требуется исправление',
++             'CHECK_REQUIRED':'Требуется проверка результата',
++             'CANCELLED_LOCAL':'Отменён на ПК до отправки в ЧЗ'}
++
++class ValidationError(ValueError): pass
++class ApiError(RuntimeError):
++    def __init__(self, message: str, http_status: int | None = None):
++        super().__init__(message)
++        self.http_status = http_status
++
++
++def dumps(x: Any) -> str:
++    return json.dumps(x, ensure_ascii=False, separators=(',', ':'), sort_keys=True)
++
++
++def valid_gtin(s: str) -> bool:
++    return (isinstance(s, str) and bool(re.fullmatch(r'[0-9]{14}', s)) and
++            sum(int(c) * (3 if i % 2 == 0 else 1) for i,c in enumerate(s[:-1])) % 10
++            == (-int(s[-1])) % 10)
++
++
++def valid_inn(s: str) -> bool:
++    if not isinstance(s,str) or not re.fullmatch(r'[0-9]{10}|[0-9]{12}', s): return False
++    d=list(map(int,s))
++    def check(weights): return sum(a*b for a,b in zip(d,weights))%11%10
++    return (check([2,4,10,3,5,9,4,6,8]) == d[9] if len(d)==10 else
++            check([7,2,4,10,3,5,9,4,6,8])==d[10] and
++            check([3,7,2,4,10,3,5,9,4,6,8])==d[11])
++
++
++def normalize_code(raw: str) -> str:
++    """Grocery only: GS1 AI01 + 14-digit GTIN + AI21 + 13-char serial.
++    Do NOT search for '91' inside serials: it is legitimate serial content.
++    A full scan without GS is accepted only if suffix starts at known boundary.
++    """
++    if not isinstance(raw,str) or len(raw)>512: raise ValidationError('Неверный формат кода')
++    code=raw.strip(' \r\n\t')
++    for prefix in (']d2',']Q3',']C1',']e0'):
++        if code.startswith(prefix): code=code[3:]; break
++    if code.startswith('(01)'):
++        # Only an explicitly delimited human-readable representation.
++        m=re.fullmatch(r'\(01\)([0-9]{14})\(21\)(.{13})(?:\((?:91|93)\).*)?',code)
++        if not m: raise ValidationError('Неоднозначный код: используйте сканер с GS/FNC1')
++        code='01'+m[1]+'21'+m[2]
++    head=code.split('\x1d',1)[0]
++    if len(head)>31:
++        if head[31:33] not in ('91','93'):
++            raise ValidationError('Нет разделителя GS после серийного номера')
++        head=head[:31]
++    if not re.fullmatch(r'01[0-9]{14}21[!-~]{13}',head):
++        raise ValidationError('Нужен DataMatrix бакалеи: 01 + GTIN + 21 + 13 символов. SSCC не подходит')
++    if not valid_gtin(head[2:16]): raise ValidationError('Ошибочная контрольная цифра GTIN')
++    return head
++
++
++def validate_job(source: Any) -> dict:
++    if not isinstance(source,dict) or type(source.get('schemaVersion')) is not int or source.get('schemaVersion')!=1:
++        raise ValidationError('Неподдерживаемый формат очереди')
++    try: ident=str(uuid.UUID(str(source['id'])))
++    except (KeyError,ValueError,TypeError): raise ValidationError('Неверный id задания')
++    env=source.get('environment')
++    if env not in HOSTS: raise ValidationError('Выберите production или sandbox')
++    inn=source.get('inn')
++    if not valid_inn(inn): raise ValidationError('Проверьте ИНН и контрольные цифры')
++    if source.get('pg')!='grocery':
++        raise ValidationError('В этой версии поддерживается только grocery: сухарики и майонезы')
++    template=source.get('template') or {}
++    if not isinstance(template,dict): raise ValidationError('Неверный шаблон набора')
++    gtin=template.get('setGtin')
++    expected=template.get('expected')
++    if not valid_gtin(gtin) or not isinstance(expected,dict) or not expected:
++        raise ValidationError('Заполните GTIN набора и состав из Национального каталога')
++    if len(expected)>100 or any(not valid_gtin(k) or type(v)!=int or not 1<=v<=1000
++                               for k,v in expected.items()):
++        raise ValidationError('Ошибочный состав шаблона')
++    if sum(expected.values())>1000: raise ValidationError('Не более 1000 пачек в наборе')
++    parent=normalize_code(source.get('setCode'))
++    if parent[2:16]!=gtin: raise ValidationError('GTIN отсканированного набора не соответствует шаблону')
++    raw=source.get('children')
++    if not isinstance(raw,list) or not 1<=len(raw)<=1000: raise ValidationError('Неверный список вложений')
++    children=[normalize_code(x) for x in raw]
++    if len(set(children))!=len(children) or parent in children:
++        raise ValidationError('Повтор кода в наборе')
++    if dict(collections.Counter(x[2:16] for x in children))!=expected:
++        raise ValidationError('Набор неполный или состав GTIN не совпадает с шаблоном')
++    return dict(schemaVersion=1,id=ident,environment=env,inn=inn,pg='grocery',
++                template=dict(setGtin=gtin,expected=expected),setCode=parent,children=children)
++
++
++def product_bytes(job: dict) -> bytes:
++    j=validate_job(job)
++    return dumps({'participantId':j['inn'],'aggregationUnits':[
++        {'unitSerialNumber':j['setCode'],'sntins':j['children']}]}).encode('utf-8')
++
++
++def make_envelope(content: bytes, signature: str) -> dict:
++    if not isinstance(signature,str): raise ValidationError('Подпись должна быть строкой Base64')
++    signature=''.join(signature.split())
++    try:
++        if len(base64.b64decode(signature, validate=True))<32: raise ValueError()
++    except (ValueError,TypeError): raise ValidationError('Пустая или неверная подпись УКЭП')
++    return dict(document_format='MANUAL',type='SETS_AGGREGATION',
++                product_document=base64.b64encode(content).decode('ascii'),signature=signature)
++
++
++class Store:
++    """Durable idempotent inbox. A scan/upload never signs or submits anything."""
++    def __init__(self, path: Path):
++        self.path=Path(path); self.path.parent.mkdir(parents=True,exist_ok=True)
++        self.lock=threading.RLock()
++        with self.connect() as c:
++            c.executescript('''
++            CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, payload TEXT NOT NULL,
++              digest TEXT NOT NULL, state TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
++              document_id TEXT, updated REAL NOT NULL);
++            CREATE TABLE IF NOT EXISTS reservations(environment TEXT NOT NULL, code TEXT NOT NULL,
++              job_id TEXT NOT NULL, PRIMARY KEY(environment,code));
++            CREATE TABLE IF NOT EXISTS events(n INTEGER PRIMARY KEY AUTOINCREMENT,
++              job_id TEXT, time REAL, state TEXT, detail TEXT);
++            ''')
++            # A crash during POST is never permission to repeat it.
++            c.execute("UPDATE jobs SET state='UNKNOWN',detail='ПК был закрыт во время отправки. Сначала проверка ЧЗ.' WHERE state='SUBMITTING'")
++    @contextmanager
++    def connect(self):
++        # Connection.__exit__ commits/rolls back, but does NOT close the handle.
++        # Explicit close is required on Windows too (backups and clean shutdown).
++        with closing(sqlite3.connect(self.path,timeout=15)) as c:
++            c.row_factory=sqlite3.Row
++            c.execute('PRAGMA journal_mode=WAL'); c.execute('PRAGMA synchronous=FULL')
++            with c:
++                yield c
++    def enqueue(self, source: dict) -> dict:
++        j=validate_job(source); payload=dumps(j); digest=hashlib.sha256(payload.encode()).hexdigest()
++        with self.lock, self.connect() as c:
++            c.execute('BEGIN IMMEDIATE')
++            old=c.execute('SELECT * FROM jobs WHERE id=?',(j['id'],)).fetchone()
++            if old:
++                if old['digest']!=digest: raise ValidationError('Тот же id, но другой состав. Изменение отклонено')
++                return self._view(old)
++            codes=[j['setCode']]+j['children']
++            for code in codes:
++                other=c.execute('SELECT job_id FROM reservations WHERE environment=? AND code=?',
++                                (j['environment'],code)).fetchone()
++                if other: raise ValidationError('Код уже зарезервирован заданием '+other[0])
++            c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?)',
++                      (j['id'],payload,digest,'WAITING_SIGNATURE','Только очередь ПК. В ЧЗ ещё НЕ отправлено.',None,time.time()))
++            c.executemany('INSERT INTO reservations VALUES(?,?,?)',
++                          [(j['environment'],code,j['id']) for code in codes])
++            c.execute('INSERT INTO events(job_id,time,state,detail) VALUES(?,?,?,?)',
++                      (j['id'],time.time(),'WAITING_SIGNATURE','Набор принят на ПК'))
++        return self.get(j['id'])
++    @staticmethod
++    def _view(row):
++        p=json.loads(row['payload'])
++        return {**p,'status':row['state'],'detail':row['detail'],
++                'documentId':row['document_id'],'payloadHash':row['digest'],'updated':row['updated']}
++    def get(self, ident: str) -> dict:
++        with self.connect() as c: row=c.execute('SELECT * FROM jobs WHERE id=?',(ident,)).fetchone()
++        if not row: raise KeyError('Задание не найдено')
++        return self._view(row)
++    def all(self) -> list[dict]:
++        with self.connect() as c:
++            return [self._view(r) for r in c.execute('SELECT * FROM jobs ORDER BY updated DESC')]
++    def change(self, ident, state, detail='', document_id=None, allowed=None):
++        if state not in STATES: raise ValidationError('Неверное состояние')
++        with self.lock,self.connect() as c:
++            c.execute('BEGIN IMMEDIATE')
++            row=c.execute('SELECT * FROM jobs WHERE id=?',(ident,)).fetchone()
++            if not row: raise KeyError(ident)
++            if allowed is not None and row['state'] not in allowed:
++                raise ValidationError('Действие запрещено в состоянии '+row['state'])
++            doc=document_id or row['document_id']
++            c.execute('UPDATE jobs SET state=?,detail=?,document_id=?,updated=? WHERE id=?',
++                      (state,str(detail)[:16000],doc,time.time(),ident))
++            c.execute('INSERT INTO events(job_id,time,state,detail) VALUES(?,?,?,?)',
++                      (ident,time.time(),state,str(detail)[:16000]))
++        return self.get(ident)
++    def cancel_unsent(self, ident: str, expected_hash: str):
++        with self.lock,self.connect() as c:
++            c.execute('BEGIN IMMEDIATE')
++            row=c.execute('SELECT * FROM jobs WHERE id=?',(ident,)).fetchone()
++            if not row or row['digest']!=expected_hash: raise ValidationError('Задание изменилось или не найдено')
++            if row['state'] not in {'WAITING_SIGNATURE','BLOCKED'} or row['document_id']:
++                raise ValidationError('Можно отменить только набор, который ещё не отправлялся в ЧЗ')
++            c.execute("UPDATE jobs SET state='CANCELLED_LOCAL',detail='Отменён пользователем на ПК. В ЧЗ не отправлялся.',updated=? WHERE id=?",(time.time(),ident))
++            c.execute('DELETE FROM reservations WHERE job_id=?',(ident,))
++            c.execute('INSERT INTO events(job_id,time,state,detail) VALUES(?,?,?,?)',(ident,time.time(),'CANCELLED_LOCAL','Локальная отмена до отправки'))
++        return self.get(ident)
++    def backup(self, destination: Path):
++        with self.lock,self.connect() as src,closing(sqlite3.connect(destination)) as dest:
++            src.backup(dest)
++
++
++class NoRedirect(request.HTTPRedirectHandler):
++    def redirect_request(self, req, fp, code, msg, headers, newurl):
++        raise ApiError('Перенаправление API отклонено. Токен не передан другому адресу.', code)
++
++
++class TrueApi:
++    def __init__(self, environment: str, token: str=''):
++        self.host=HOSTS[environment]; self.token=token
++        self.opener=request.build_opener(NoRedirect())
++    def call(self, method, path, payload=None, version=3, auth=True):
++        headers={'Accept':'application/json, text/plain, application/octet-stream','Content-Type':'application/json; charset=utf-8'}
++        if auth:
++            if not self.token: raise ApiError('Не выполнен вход по УКЭП на ПК')
++            headers['Authorization']='Bearer '+self.token
++        req=request.Request(self.host+f'/api/v{version}/true-api'+path,
++                            data=None if payload is None else dumps(payload).encode(),
++                            headers=headers,method=method)
++        try:
++            with self.opener.open(req,timeout=45) as resp:
++                content=resp.read(8_000_001)
++                if len(content)>8_000_000: raise ApiError('Слишком большой ответ API')
++                text=content.decode('utf-8-sig')
++                try: return json.loads(text)
++                except json.JSONDecodeError:
++                    try: return str(uuid.UUID(text.strip()))
++                    except ValueError: raise ApiError('API вернул не JSON: '+text[:500])
++        except error.HTTPError as e:
++            detail=e.read(8000).decode('utf-8',errors='replace')
++            raise ApiError(f'HTTP {e.code}: {detail}',e.code) from e
++        except (error.URLError,TimeoutError,OSError) as e:
++            raise ApiError('Сетевая ошибка: '+str(e)) from e
++    def authenticate(self, signer, inn):
++        challenge=self.call('GET','/auth/key',auth=False)
++        if not isinstance(challenge,dict) or not isinstance(challenge.get('data'),str):
++            raise ApiError('Неожиданный ответ /auth/key')
++        # Sign UTF-8 bytes of the data string, with ATTACHED signature for login.
++        signed=signer.sign(challenge['data'].encode('utf-8'),detached=False)
++        result=self.call('POST','/auth/simpleSignIn',dict(uuid=challenge['uuid'],data=signed,
++                         inn=inn,unitedToken=True),auth=False)
++        token=(result.get('token') or result.get('uuidToken')) if isinstance(result,dict) else None
++        if not isinstance(token,str) or not token or '\r' in token or '\n' in token:
++            raise ApiError('Не получен токен True API. Проверьте регистрацию, полномочия сертификата и выбранный ИНН.')
++        self.token=token
++    def codes(self, codes: list[str], pg='grocery') -> dict[str,dict]:
++        result={}
++        for start in range(0,len(codes),100):
++            raw=self.call('POST','/cises/info?'+parse.urlencode({'pg':pg}),codes[start:start+100])
++            if not isinstance(raw,list): raise ApiError('Неожиданный формат /cises/info. Проверка остановлена')
++            for item in raw:
++                if not isinstance(item,dict): raise ApiError('Неверный элемент /cises/info')
++                info=item.get('cisInfo')
++                if not isinstance(info,dict):
++                    raise ApiError('Код недоступен: '+str(item)[:1500])
++                cis=info.get('cis') or item.get('requestedCis')
++                if not isinstance(cis,str): raise ApiError('В ответе нет идентификатора кода')
++                result[normalize_code(cis)]=info
++        missing=set(codes)-result.keys()
++        if missing: raise ApiError(f'Не получены сведения о {len(missing)} кодах. Отправки нет')
++        return result
++    def document_info(self, ident: str, pg='grocery'):
++        ident=str(uuid.UUID(ident))
++        return self.call('GET',f'/doc/{ident}/info?'+parse.urlencode({'pg':pg}),version=4)
++
++
++def child_codes(info: dict) -> set[str] | None:
++    raw=info.get('child')
++    if raw is None: raw=info.get('children')
++    if raw is None: return None
++    if not isinstance(raw,list): raise ApiError('Неожиданный формат вложений в ответе ЧЗ')
++    result=[]
++    for x in raw:
++        code=x if isinstance(x,str) else (x.get('cis') if isinstance(x,dict) else None)
++        if not isinstance(code,str): raise ApiError('Неожиданный формат кода вложения')
++        result.append(normalize_code(code))
++    if len(result)!=len(set(result)): raise ApiError('Повтор вложений в ответе ЧЗ')
++    return set(result)
++
++
++def preflight(job: dict, info: dict[str,dict]):
++    """OSU deliberately does NOT reject children's ownerInn mismatch.
++    True API still decides whether OSU exception applies to the actual codes.
++    This pilot handles purchased, already introduced grocery units only.
++    """
++    j=validate_job(job); parent=info[j['setCode']]
++    if parent.get('ownerInn')!=j['inn']: raise ValidationError('Код НАБОРА не принадлежит вашему ИНН')
++    if parent.get('packageType')!='SET' and parent.get('packType')!='SET':
++        raise ValidationError('Код верхнего уровня не является набором SET')
++    if parent.get('status')!='APPLIED': raise ValidationError('Код набора должен быть «Нанесён» (APPLIED)')
++    if parent.get('emissionType')!='LOCAL': raise ValidationError('Для этого сценария тип эмиссии набора должен быть LOCAL')
++    if parent.get('parent') or parent.get('parentCis'): raise ValidationError('Набор уже вложен в агрегат')
++    if child_codes(parent): raise ValidationError('Набор уже содержит вложения')
++    if parent.get('statusEx') not in (None,'','EMPTY','WAIT_TRANSFER_TO_OWNER'):
++        raise ValidationError('Особое состояние кода набора: '+str(parent.get('statusEx')))
++    for code in j['children']:
++        i=info[code]
++        if i.get('status')!='INTRODUCED': raise ValidationError('Вложение должно быть «В обороте»: '+code[-6:])
++        if i.get('statusEx') not in (None,'','EMPTY','WAIT_TRANSFER_TO_OWNER'):
++            raise ValidationError('Проверьте особое состояние пачки: '+str(i.get('statusEx')))
++        if i.get('packageType')!='UNIT' and i.get('packType')!='UNIT':
++            raise ValidationError('В набор бакалеи допускаются только единицы товара UNIT')
++        if i.get('parent') or i.get('parentCis'):
++            raise ValidationError('Пачка уже вложена в другой агрегат: '+code[-6:])
++
++
++def verify_set(job: dict, info: dict[str,dict]) -> None:
++    j=validate_job(job); i=info[j['setCode']]
++    if i.get('status')!='INTRODUCED' or i.get('ownerInn')!=j['inn']:
++        raise ValidationError('Не подтверждены статус/владелец сформированного набора')
++    if i.get('packageType')!='SET' and i.get('packType')!='SET':
++        raise ValidationError('В ЧЗ не подтверждён тип SET')
++    children=child_codes(i)
++    if children is None: raise ValidationError('ЧЗ не вернул полный список вложений. Успех не подтверждён')
++    if children!=set(j['children']): raise ValidationError('Состав набора в ЧЗ не совпадает со сканированием')
++
++
++def document_status(raw: Any) -> tuple[str,str]:
++    if isinstance(raw,list) and len(raw)==1: raw=raw[0]
++    if not isinstance(raw,dict): return ('UNRECOGNIZED',str(raw)[:1500])
++    status=raw.get('status')
++    if not isinstance(status,str): return ('UNRECOGNIZED',dumps(raw)[:3000])
++    detail=raw.get('downloadDesc') or raw.get('errorMessage') or raw.get('errors') or ''
++    return status, detail if isinstance(detail,str) else dumps(detail)
++
++
++class Engine:
++    def __init__(self,store: Store): self.store=store
++    def submit(self, ident: str, api: TrueApi, signer):
++        j=self.store.get(ident)
++        if j['status'] not in {'WAITING_SIGNATURE','BLOCKED'}:
++            raise ValidationError('Повторная отправка запрещена. Сначала проверка существующего документа')
++        try:
++            preflight(j,api.codes([j['setCode']]+j['children']))
++            content=product_bytes(j)
++            signature=signer.sign(content,detached=True)
++            envelope=make_envelope(content,signature)
++        except Exception as e:
++            self.store.change(ident,'BLOCKED',str(e),allowed={'WAITING_SIGNATURE','BLOCKED'})
++            raise
++        # Persist BEFORE starting POST. Never auto-retry this operation.
++        self.store.change(ident,'SUBMITTING','Подписан. Начата отправка.',allowed={'WAITING_SIGNATURE','BLOCKED'})
++        try:
++            result=api.call('POST','/lk/documents/create?pg=grocery',envelope)
++            if isinstance(result,dict):
++                result=result.get('value') or result.get('document_id') or result.get('documentId')
++            doc_id=str(uuid.UUID(str(result)))
++        except Exception as e:
++            self.store.change(ident,'UNKNOWN',str(e)+'\nАвтоповтор запрещён. Проверьте набор/документы ЧЗ.')
++            raise
++        self.store.change(ident,'SUBMITTED','ЧЗ принял запрос. Результат ещё не подтверждён.',doc_id)
++        return self.refresh(ident,api)
++    def refresh(self,ident: str,api: TrueApi):
++        j=self.store.get(ident)
++        if j['status'] in {'WAITING_SIGNATURE','BLOCKED','CANCELLED_LOCAL','VERIFIED'}: return j
++        if not j['documentId']:
++            try: verify_set(j,api.codes([j['setCode']]))
++            except (ValidationError,ApiError) as e:
++                return self.store.change(ident,'UNKNOWN',str(e)+'\nНе отправляйте повторно. Проверьте ЛК ЧЗ.')
++            return self.store.change(ident,'VERIFIED','Восстановлено по ЧЗ: владелец, статус и полный состав совпали. ID документа не восстановлен.')
++        status,detail=document_status(api.document_info(j['documentId']))
++        if status=='CHECKED_OK':
++            try: verify_set(j,api.codes([j['setCode']]))
++            except (ValidationError,ApiError) as e:
++                return self.store.change(ident,'CHECK_REQUIRED','Документ обработан, но '+str(e))
++            return self.store.change(ident,'VERIFIED','Документ обработан, владелец и полный состав проверены.')
++        if status in {'CHECKED_NOT_OK','PARSE_ERROR','PROCESSING_ERROR','CANCELLED'}:
++            return self.store.change(ident,'REJECTED',status+': '+detail)
++        if status=='UNRECOGNIZED':
++            return self.store.change(ident,'CHECK_REQUIRED','Неизвестный формат статуса документа: '+detail)
++        return self.store.change(ident,'PROCESSING',status+': '+detail)
+--- /dev/null
++++ b/companion_pc/requirements.txt
+@@ -0,0 +1,2 @@
++cryptography==46.0.4
++qrcode==8.2
+--- /dev/null
++++ b/companion_pc/server.py
+@@ -0,0 +1,261 @@
++"""CHZ PC companion: LAN inbox + loopback-only approval UI. Run with Start_PC.cmd.
++The LAN service cannot authenticate to CHZ, sign, or submit. User approval is local.
++"""
++from __future__ import annotations
++import argparse
++import base64
++import concurrent.futures
++import hmac
++import io
++import ipaddress
++import json
++import os
++import secrets
++import socket
++import threading
++import time
++import uuid
++import webbrowser
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from pathlib import Path
++from urllib.parse import urlsplit
++from core import Store, Engine, TrueApi, ValidationError, ApiError, VERSION, MAX_BYTES, dumps, STATUS_RU
++from signer import WindowsSigner, certificates
++from transport import setup
++
++ROOT=Path(__file__).resolve().parent
++ACTIVE={'SUBMITTED','PROCESSING','CHECK_REQUIRED','UNKNOWN'}
++
++def is_lan_v4(host):
++    try:
++        ip=ipaddress.ip_address(host)
++        return ip.version==4 and any(ip in ipaddress.ip_network(n) for n in ('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16'))
++    except ValueError: return False
++
++class State:
++    def __init__(self, data_dir, settings, advertise=None):
++        self.settings=settings; self.admin_key=secrets.token_urlsafe(32)
++        self.data_dir=data_dir; self.store=Store(data_dir/'queue.sqlite3'); self.engine=Engine(self.store)
++        self.sessions={}; self.operations={}; self.op_lock=threading.RLock(); self.worker=concurrent.futures.ThreadPoolExecutor(max_workers=1)
++        self.api_lock=threading.RLock(); self.stop=threading.Event(); self.advertise=advertise
++    def addresses(self):
++        result=[]
++        if self.advertise: result=[self.advertise]
++        else:
++            try:
++                result=[x[4][0] for x in socket.getaddrinfo(socket.gethostname(),None,socket.AF_INET)]
++                with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as s:
++                    s.connect(('192.0.2.1',9)); result.append(s.getsockname()[0]) # Route lookup only, no packet is sent.
++            except OSError: pass
++        return sorted(set(x for x in result if is_lan_v4(x)))
++    def connection(self, host=None):
++        addresses=self.addresses()
++        if host is not None:
++            if host not in addresses: raise ValidationError('Выберите один из локальных адресов ПК')
++        else: host=addresses[0] if addresses else None
++        result={'addresses':addresses,'lanPort':self.settings['lanPort'],
++                'deviceKey':self.settings['deviceKey'], 'certificateSha256':self.settings['certificateSha256']}
++        if host:
++            result['url']=f"https://{host}:{self.settings['lanPort']}"
++            pair={'url':result['url'],'key':result['deviceKey'],'pin':result['certificateSha256']}
++            result['pairing']='CZPAIR1:'+base64.urlsafe_b64encode(dumps(pair).encode()).decode().rstrip('=')
++        return result
++    def schedule(self, action, payload):
++        if payload.get('confirmed') is not True: raise ValidationError('Нужно явное подтверждение на ПК')
++        items=payload.get('items')
++        if not isinstance(items,list) or not 1<=len(items)<=50: raise ValidationError('Выберите от 1 до 50 наборов')
++        snapshot=[]; seen=set()
++        for item in items:
++            j=self.store.get(str(uuid.UUID(item['id'])))
++            if j['id'] in seen: raise ValidationError('Повтор задания')
++            if not hmac.compare_digest(j['payloadHash'], str(item.get('hash',''))):
++                raise ValidationError('Состав изменился. Обновите окно и проверьте ещё раз')
++            if action=='submit' and j['status'] not in {'WAITING_SIGNATURE','BLOCKED'}:
++                raise ValidationError('В выборе есть уже отправленный набор; повторная отправка запрещена')
++            seen.add(j['id']); snapshot.append(j)
++        if len({(j['inn'],j['environment']) for j in snapshot})!=1:
++            raise ValidationError('За один раз выбирайте наборы одного ИНН и одного контура')
++        signer=WindowsSigner(payload.get('thumbprint',''))
++        ident=str(uuid.uuid4())
++        with self.op_lock:
++            if any(x['state'] in ('QUEUED','RUNNING') for x in self.operations.values()):
++                raise ValidationError('Дождитесь завершения предыдущей операции')
++            self.operations[ident]={'state':'QUEUED','action':action,'total':len(snapshot),'done':0,'error':''}
++        self.worker.submit(self._run,ident,action,snapshot,signer)
++        return {'operationId':ident}
++    def _run(self, ident, action, jobs, signer):
++        op=self.operations[ident]; op['state']='RUNNING'
++        try:
++            with self.api_lock:
++                first=jobs[0]; key=(first['environment'],first['inn'],signer.thumbprint)
++                # Authentication signature is deliberately initiated only by a local user's action.
++                api=TrueApi(first['environment']); api.authenticate(signer,first['inn'])
++                self.sessions[key]=(api,time.time())
++                for j in jobs:
++                    if action=='submit': self.engine.submit(j['id'],api,signer)
++                    else: self.engine.refresh(j['id'],api)
++                    op['done']+=1
++            op['state']='DONE'
++        except Exception as e:
++            op['state']='ERROR'; op['error']=str(e)[:3000]
++    def poll(self):
++        while not self.stop.wait(20):
++            if not self.api_lock.acquire(blocking=False): continue
++            try:
++                for j in self.store.all():
++                    if j['status'] not in ACTIVE: continue
++                    matches=[v for k,v in self.sessions.items() if k[:2]==(j['environment'],j['inn'])]
++                    if not matches: continue
++                    api,created=max(matches,key=lambda x:x[1])
++                    if time.time()-created>8*3600: continue
++                    try: self.engine.refresh(j['id'],api)
++                    except (ApiError,ValidationError): pass # Preserve state; never re-authenticate or re-submit in a timer.
++            finally: self.api_lock.release()
++    def public_jobs(self):
++        return [dict(j,statusRu=STATUS_RU.get(j['status'],j['status'])) for j in self.store.all()]
++
++class Server(ThreadingHTTPServer):
++    daemon_threads=True
++    allow_reuse_address=False
++
++class Handler(BaseHTTPRequestHandler):
++    server_version='CHZ-Local/1.3'
++    def log_message(self, *args): pass # No pairing keys, authorization headers, or individual marking codes in access logs.
++    def setup(self):
++        super().setup(); self.connection.settimeout(15)
++    @property
++    def state(self): return self.server.state
++    @property
++    def lane(self): return self.server.lane
++    def response(self, code, body, mime='application/json; charset=utf-8'):
++        if not isinstance(body,bytes): body=dumps(body).encode()
++        self.send_response(code)
++        self.send_header('Content-Type',mime); self.send_header('Content-Length',str(len(body)))
++        self.send_header('Cache-Control','no-store'); self.send_header('X-Content-Type-Options','nosniff')
++        self.send_header('Referrer-Policy','no-referrer')
++        self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
++        self.end_headers(); self.wfile.write(body)
++    def read_json(self):
++        if self.headers.get('Transfer-Encoding'): raise ValidationError('Chunked bodies are not supported')
++        length=int(self.headers.get('Content-Length','0'))
++        if length<=0 or length>MAX_BYTES: raise ValidationError('Неверный размер сообщения')
++        if self.headers.get('Content-Type','').split(';',1)[0].lower()!='application/json':
++            raise ValidationError('Требуется application/json')
++        content=self.rfile.read(length)
++        if len(content)!=length: raise ValidationError('Сообщение получено не полностью')
++        return json.loads(content.decode('utf-8'))
++    def authorize(self):
++        if self.lane=='admin':
++            expected=f"127.0.0.1:{self.server.server_port}"
++            if self.headers.get('Host')!=expected or self.client_address[0]!='127.0.0.1':
++                self.response(403,{'error':'Локальная панель доступна только на этом ПК'}); return False
++            origin=self.headers.get('Origin')
++            if origin and origin!=f'http://{expected}':
++                self.response(403,{'error':'Чужой Origin'}); return False
++            key=self.headers.get('X-Admin-Key','')
++            if not hmac.compare_digest(key,self.state.admin_key):
++                self.response(401,{'error':'Откройте панель по ссылке из окна Start_PC.cmd'}); return False
++        else:
++            if self.client_address[0]!='127.0.0.1' and not is_lan_v4(self.client_address[0]):
++                self.response(403,{'error':'Только локальная сеть'}); return False
++            key=self.headers.get('Authorization','')
++            if not hmac.compare_digest(key,'Bearer '+self.state.settings['deviceKey']):
++                self.response(401,{'error':'Неверный ключ подключения к ПК'}); return False
++            if self.headers.get('Origin'):
++                self.response(403,{'error':'LAN API предназначен для ТСД, не браузера'}); return False
++        return True
++    def do_GET(self): self.handle_safe('GET')
++    def do_POST(self): self.handle_safe('POST')
++    def handle_safe(self, method):
++        try: self.route(method)
++        except (ValidationError, ValueError, KeyError, TypeError) as e:
++            self.response(400,{'error':str(e)[:2000]})
++        except (ConnectionError,TimeoutError): pass
++        except Exception as e:
++            self.response(500,{'error':'Операция не завершена: '+str(e)[:1500]})
++    def route(self,method):
++        url=urlsplit(self.path); path=url.path
++        if method=='GET' and self.lane=='admin' and path in ('/','/app.js','/style.css'):
++            # Page shell carries no data or credentials. Its API still requires the local secret.
++            if self.headers.get('Host')!=f'127.0.0.1:{self.server.server_port}':
++                self.response(403,{'error':'Неверный Host'}); return
++            name={'/':'index.html','/app.js':'app.js','/style.css':'style.css'}[path]
++            mime={'/':'text/html; charset=utf-8','/app.js':'text/javascript; charset=utf-8','/style.css':'text/css; charset=utf-8'}[path]
++            self.response(200,(ROOT/'web'/name).read_bytes(),mime); return
++        if not self.authorize(): return
++        if self.lane=='lan':
++            if path=='/v1/ping' and method=='GET': self.response(200,{'version':VERSION,'signing':'PC confirmation required'}); return
++            if path=='/v1/jobs' and method=='POST':
++                self.response(200,self.state.store.enqueue(self.read_json())); return
++            if path.startswith('/v1/jobs/') and method=='GET':
++                ident=str(uuid.UUID(path.split('/')[-1])); self.response(200,self.state.store.get(ident)); return
++            self.response(404,{'error':'ТСД может только передать набор и получить его статус'}); return
++        if path=='/api/state' and method=='GET':
++            self.response(200,{'version':VERSION,'jobs':self.state.public_jobs(),
++                       'operations':self.state.operations,'dataDir':str(self.state.data_dir)}); return
++        if path=='/api/connection' and method=='GET': self.response(200,self.state.connection()); return
++        if path=='/api/pair.svg' and method=='GET':
++            import qrcode
++            import qrcode.image.svg
++            from urllib.parse import parse_qs
++            host=parse_qs(url.query).get('host',[None])[0]
++            pair=self.state.connection(host).get('pairing')
++            if not pair: raise ValidationError('Не найден локальный IP. Запустите с --advertise 192.168.x.x')
++            image=qrcode.make(pair,image_factory=qrcode.image.svg.SvgPathImage,box_size=8,border=4)
++            stream=io.BytesIO(); image.save(stream)
++            self.response(200,stream.getvalue(),'image/svg+xml'); return
++        if path=='/api/certificates' and method=='POST':
++            self.read_json(); self.response(200,{'certificates':certificates()}); return
++        if path in ('/api/submit','/api/refresh') and method=='POST':
++            self.response(202,self.state.schedule(path.split('/')[-1],self.read_json())); return
++        if path=='/api/cancel' and method=='POST':
++            body=self.read_json()
++            if body.get('confirmed') is not True: raise ValidationError('Нужно подтверждение отмены')
++            items=body.get('items')
++            if not isinstance(items,list) or not 1<=len(items)<=50: raise ValidationError('Выберите 1–50 заданий')
++            with self.state.op_lock:
++                if any(x['state'] in ('QUEUED','RUNNING') for x in self.state.operations.values()):
++                    raise ValidationError('Дождитесь завершения операции подписи/проверки')
++                # Validate ALL entries before making any cancellation.
++                for item in items:
++                    j=self.state.store.get(str(uuid.UUID(item['id'])))
++                    if j['payloadHash']!=item.get('hash') or j['status'] not in {'WAITING_SIGNATURE','BLOCKED'} or j['documentId']:
++                        raise ValidationError('В выборе есть уже отправленный/изменившийся набор')
++                result=[self.state.store.cancel_unsent(x['id'],x['hash']) for x in items]
++            self.response(200,{'jobs':result}); return
++        if path=='/api/backup' and method=='POST':
++            self.read_json(); dest=self.state.data_dir/f"backup-{time.strftime('%Y%m%d-%H%M%S')}.sqlite3"
++            self.state.store.backup(dest); self.response(200,{'path':str(dest)}); return
++        self.response(404,{'error':'Нет такого действия'})
++
++def main():
++    parser=argparse.ArgumentParser(description='ТСД Честный ЗНАК — помощник подписи на ПК')
++    parser.add_argument('--data-dir',type=Path,default=Path(os.environ.get('LOCALAPPDATA',str(Path.home())))/'CHZSetCollector')
++    parser.add_argument('--advertise',help='Локальный IPv4 ПК для подключения ТСД')
++    parser.add_argument('--no-browser',action='store_true')
++    args=parser.parse_args()
++    if args.advertise and (not is_lan_v4(args.advertise)):
++        parser.error('--advertise должен быть локальным IPv4')
++    settings=setup(args.data_dir)
++    # Bind first: a second instance must not reopen/reset the live queue.
++    admin=Server(('127.0.0.1',settings['adminPort']),Handler)
++    try: lan=Server(('0.0.0.0',settings['lanPort']),Handler)
++    except Exception: admin.server_close(); raise
++    state=State(args.data_dir,settings,args.advertise)
++    for server,lane in ((admin,'admin'),(lan,'lan')): server.state=state; server.lane=lane
++    lan.socket=settings['sslContext'].wrap_socket(lan.socket,server_side=True)
++    for target in (admin.serve_forever,lan.serve_forever,state.poll): threading.Thread(target=target,daemon=True).start()
++    link=f"http://127.0.0.1:{settings['adminPort']}/#"+state.admin_key
++    print('\nЧЗ: Наборы '+VERSION+' — окно не закрывать во время работы.')
++    print('Панель только на этом ПК:',link)
++    print('Папка данных:',args.data_dir)
++    print('ТСД: одна локальная сеть. Коды подключения находятся в панели.')
++    print('Отправка в ЧЗ ТОЛЬКО после кнопки «Подписать и отправить» на ПК.')
++    if not args.no_browser: webbrowser.open(link)
++    try:
++        while True: time.sleep(1)
++    except KeyboardInterrupt:
++        state.stop.set(); admin.shutdown(); lan.shutdown(); state.worker.shutdown(wait=False,cancel_futures=True)
++        print('Остановлено. Очередь сохранена.')
++
++if __name__=='__main__': main()
+--- /dev/null
++++ b/companion_pc/signer.ps1
+@@ -0,0 +1,46 @@
++# Current-user certificate store only. Never exports private keys or caches a PIN.
++# CAdESCOM API: docs.cryptopro.ru/cades/reference/cadescom
++$ErrorActionPreference = 'Stop'
++[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
++[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
++$store = $null
++try {
++    $req = [Console]::In.ReadToEnd() | ConvertFrom-Json
++    $store = New-Object -ComObject CAdESCOM.Store
++    $store.Open(2, 'My', 0) # CAPICOM_CURRENT_USER_STORE, MY, read-only
++    if ($req.action -eq 'certificates') {
++        $items = @()
++        for ($n=1; $n -le $store.Certificates.Count; $n++) {
++            $c = $store.Certificates.Item($n)
++            if ($c.HasPrivateKey() -and [datetime]$c.ValidToDate -gt (Get-Date) -and [datetime]$c.ValidFromDate -le (Get-Date)) {
++                $items += @{ thumbprint=[string]$c.Thumbprint; subject=[string]$c.SubjectName;
++                    issuer=[string]$c.IssuerName; validTo=([datetime]$c.ValidToDate).ToString('s') }
++            }
++        }
++        @{ certificates=@($items) } | ConvertTo-Json -Depth 5 -Compress
++    } elseif ($req.action -eq 'sign') {
++        $thumb = ([string]$req.thumbprint -replace '\s','').ToUpperInvariant()
++        if ($thumb -notmatch '^[0-9A-F]{40}$') { throw 'Invalid certificate thumbprint' }
++        $matches = $store.Certificates.Find(0, $thumb) # SHA1_HASH
++        if ($matches.Count -ne 1) { throw 'Signing certificate not found in CurrentUser\My' }
++        $cert = $matches.Item(1)
++        if (-not $cert.HasPrivateKey()) { throw 'Certificate has no private key' }
++        if ([datetime]$cert.ValidToDate -le (Get-Date)) { throw 'Signing certificate expired' }
++        $signer = New-Object -ComObject CAdESCOM.CPSigner
++        $signer.Certificate = $cert
++        $signer.CheckCertificate = $true
++        $data = New-Object -ComObject CAdESCOM.CadesSignedData
++        $data.ContentEncoding = 1 # CADESCOM_BASE64_TO_BINARY, set BEFORE Content
++        $data.Content = [string]$req.contentBase64
++        $detached = [bool]$req.detached
++        $signature = $data.SignCades($signer, 1, $detached) # CADESCOM_CADES_BES
++        # Verify the generated CMS before returning it to the API client.
++        $data.VerifyCades($signature, 1, $detached)
++        @{ signature=([string]$signature -replace '\s','') } | ConvertTo-Json -Compress
++    } else { throw 'Unsupported signing action' }
++} catch {
++    @{ error=$_.Exception.Message } | ConvertTo-Json -Compress
++    exit 1
++} finally {
++    if ($null -ne $store) { try { $store.Close() } catch {} }
++}
+--- /dev/null
++++ b/companion_pc/signer.py
+@@ -0,0 +1,52 @@
++"""Windows CAdES COM adapter. The private key and PIN never enter Python/Android."""
++from __future__ import annotations
++import base64
++import json
++import os
++import re
++import subprocess
++from pathlib import Path
++from core import ValidationError
++
++SCRIPT = Path(__file__).with_name('signer.ps1')
++
++def invoke(payload: dict) -> dict:
++    if os.name != 'nt':
++        raise ValidationError('УКЭП: нужен Windows с КриптоПро CSP и компонентом CAdESCOM (КриптоПро ЭЦП).')
++    # Use the system executable, not a potentially shadowed program from PATH.
++    ps = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
++    try:
++        result = subprocess.run([str(ps), '-NoLogo', '-NoProfile', '-STA',
++              '-ExecutionPolicy', 'Bypass', '-File', str(SCRIPT)],
++              input=json.dumps(payload).encode('utf-8'), capture_output=True, timeout=180,
++              creationflags=subprocess.CREATE_NO_WINDOW, check=False)
++    except subprocess.TimeoutExpired as e:
++        raise ValidationError('Истекло время ожидания подписи. Документ не отправлен. Проверьте окно КриптоПро/PIN.') from e
++    try:
++        response = json.loads(result.stdout.decode('utf-8-sig'))
++    except (ValueError, UnicodeError) as e:
++        raise ValidationError('Не удалось запустить CAdESCOM: '+result.stderr.decode('utf-8', errors='replace')[:1200]) from e
++    if result.returncode or response.get('error'):
++        raise ValidationError(response.get('error', 'Ошибка КриптоПро'))
++    return response
++
++
++def certificates() -> list[dict]:
++    response = invoke({'action': 'certificates'})
++    result = response.get('certificates', [])
++    return result if isinstance(result, list) else [result]
++
++
++class WindowsSigner:
++    def __init__(self, thumbprint: str):
++        self.thumbprint = re.sub(r'\s', '', str(thumbprint)).upper()
++        if not re.fullmatch(r'[0-9A-F]{40}', self.thumbprint):
++            raise ValidationError('Выберите сертификат УКЭП из списка на ПК')
++    def sign(self, content: bytes, detached: bool) -> str:
++        result = invoke({'action': 'sign', 'thumbprint': self.thumbprint,
++                    'contentBase64': base64.b64encode(content).decode('ascii'),
++                    'detached': bool(detached)})
++        signature = result.get('signature')
++        if not isinstance(signature, str) or not signature:
++            raise ValidationError('КриптоПро не вернул подпись')
++        return ''.join(signature.split())
+--- /dev/null
++++ b/companion_pc/transport.py
+@@ -0,0 +1,54 @@
++"""Local TLS with certificate pinning. No public cloud, no remote signing endpoint."""
++from __future__ import annotations
++import hashlib
++import ipaddress
++import json
++import os
++import secrets
++import ssl
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++
++def atomic_file(path: Path, content: bytes):
++    tmp = path.with_suffix(path.suffix+'.tmp')
++    with open(tmp, 'wb') as f:
++        f.write(content); f.flush(); os.fsync(f.fileno())
++    os.replace(tmp, path)
++    try: path.chmod(0o600)
++    except OSError: pass
++
++
++def setup(data_dir: Path) -> dict:
++    from cryptography import x509
++    from cryptography.hazmat.primitives import hashes, serialization
++    from cryptography.hazmat.primitives.asymmetric import rsa
++    from cryptography.x509.oid import NameOID
++    data_dir.mkdir(parents=True, exist_ok=True)
++    conf = data_dir/'connection.json'
++    if conf.exists():
++        settings=json.loads(conf.read_text('utf-8'))
++    else:
++        settings={'deviceKey':secrets.token_urlsafe(32), 'lanPort':18765, 'adminPort':18766}
++        atomic_file(conf, json.dumps(settings).encode())
++    cert_path=data_dir/'tls.crt'; key_path=data_dir/'tls.key'
++    if not cert_path.exists() or not key_path.exists():
++        key=rsa.generate_private_key(public_exponent=65537, key_size=2048)
++        name=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'CHZ Local Set Collector')])
++        now=datetime.now(timezone.utc)
++        cert=(x509.CertificateBuilder().subject_name(name).issuer_name(name)
++            .public_key(key.public_key()).serial_number(x509.random_serial_number())
++            .not_valid_before(now-timedelta(minutes=5)).not_valid_after(now+timedelta(days=1825))
++            .add_extension(x509.SubjectAlternativeName([x509.DNSName('localhost'),
++                  x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]), critical=False)
++            .sign(key, hashes.SHA256()))
++        atomic_file(key_path, key.private_bytes(serialization.Encoding.PEM,
++                        serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
++        atomic_file(cert_path, cert.public_bytes(serialization.Encoding.PEM))
++    cert=x509.load_pem_x509_certificate(cert_path.read_bytes())
++    settings['certificateSha256']=cert.fingerprint(hashes.SHA256()).hex()
++    ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
++    ctx.minimum_version=ssl.TLSVersion.TLSv1_2
++    ctx.load_cert_chain(cert_path, key_path)
++    settings['sslContext']=ctx
++    return settings
+--- /dev/null
++++ b/companion_pc/web/app.js
+@@ -0,0 +1,79 @@
++'use strict';
++const $=id=>document.getElementById(id);
++const key=location.hash.slice(1)||sessionStorage.getItem('chzAdminKey')||'';
++if(key)sessionStorage.setItem('chzAdminKey',key);
++history.replaceState(null,'',location.pathname);
++let jobs=[],certs=[],chosen=new Set(),busy=false,pairUrl=null;
++const text=(tag,value,css)=>{const n=document.createElement(tag);n.textContent=value;if(css)n.className=css;return n;};
++async function api(path,body){
++ const r=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'X-Admin-Key':key,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',redirect:'error'});
++ const data=await r.json();if(!r.ok)throw Error(data.error||('HTTP '+r.status));return data;
++}
++function message(value,error=false){$('message').textContent=value;$('message').className=error?'error':'';}
++function draw(){
++ const root=$('jobs');root.replaceChildren();
++ if(!jobs.length){root.append(text('p','Очередь пуста. Соберите набор на ТСД и нажмите «Передать на ПК».'));return;}
++ for(const j of jobs){
++  const card=text('article','', 'job');const label=document.createElement('label');
++  const cb=document.createElement('input');cb.type='checkbox';cb.checked=chosen.has(j.id);cb.onchange=()=>{cb.checked?chosen.add(j.id):chosen.delete(j.id);};
++  label.append(cb,text('span',j.setCode,'title mono'));card.append(label);
++  card.append(text('p',`${j.environment==='production'?'PRODUCTION — РЕАЛЬНЫЙ ЧЗ':'SANDBOX — ТЕСТОВЫЙ КОНТУР'} · ИНН ${j.inn} · ${j.children.length} пачек`,'meta'));
++  card.append(text('p',j.statusRu,'status'+(j.status==='VERIFIED'?' success':j.status==='UNKNOWN'||j.status==='REJECTED'?' error':'')));
++  card.append(text('p',j.detail||''));
++  if(j.documentId)card.append(text('p','Документ ЧЗ: '+j.documentId,'mono'));
++  const details=document.createElement('details');details.append(text('summary','Проверить состав и документ'));
++  details.append(text('pre',Object.entries(j.template.expected).map(([g,n])=>`${g} × ${n}`).join('\n')));
++  const product={participantId:j.inn,aggregationUnits:[{unitSerialNumber:j.setCode,sntins:j.children}]};
++  details.append(text('pre',JSON.stringify(product,null,2)));card.append(details);root.append(card);
++ }
++}
++async function refresh(){
++ const data=await api('/api/state');jobs=data.jobs;
++ $('version').textContent='Версия '+data.version+' · опытная сборка';$('dataDir').textContent=data.dataDir;
++ $('operations').textContent=Object.values(data.operations).map(o=>`${o.action==='submit'?'Отправка':'Проверка'}: ${o.state}, ${o.done}/${o.total}${o.error?' · '+o.error:''}`).join('\n');
++ const working=Object.values(data.operations).some(o=>['RUNNING','QUEUED'].includes(o.state));
++ $('sign').disabled=working||busy;$('check').disabled=working||busy;draw();
++}
++async function perform(action){
++ const selected=jobs.filter(j=>chosen.has(j.id));const thumb=$('certificates').value;
++ if(!selected.length)throw Error('Выберите хотя бы один набор');if(!thumb)throw Error('Выберите сертификат УКЭП');
++ if(new Set(selected.map(j=>j.inn+'|'+j.environment)).size!==1)throw Error('Выберите одну организацию и один контур');
++ if(action==='submit'&&selected.some(j=>!['WAITING_SIGNATURE','BLOCKED'].includes(j.status)))throw Error('Есть уже отправленные наборы. Для них используйте «Проверить», а не повторную отправку.');
++ const c=certs.find(c=>c.thumbprint===thumb);
++ const msg=`${action==='submit'?'ПОДПИСАТЬ И ОТПРАВИТЬ в ЧЗ':'Проверить в ЧЗ (без повторной отправки)'}\nНаборов: ${selected.length}\nИНН: ${selected[0].inn}\nКонтур: ${selected[0].environment}\nСертификат: ${c?.subject||thumb}\n\n${action==='submit'?'Это не черновик. Вы проверили состав и действительно подтверждаете отправку?':'Будет выполнен вход по УКЭП и чтение сведений. Продолжить?'}`;
++ if(!confirm(msg))return;
++ busy=true;$('sign').disabled=true;$('check').disabled=true;
++ try{await api('/api/'+action,{confirmed:true,thumbprint:thumb,items:selected.map(j=>({id:j.id,hash:j.payloadHash}))});message('Операция запущена. При запросе введите PIN в окне КриптоПро.');await refresh();}finally{busy=false;}
++}
++async function showQr(){
++ if(pairUrl)URL.revokeObjectURL(pairUrl);
++ const host=$('hostSelect').value;
++ const r=await fetch('/api/pair.svg?host='+encodeURIComponent(host),{headers:{'X-Admin-Key':key},cache:'no-store'});
++ if(!r.ok)throw Error((await r.json()).error);pairUrl=URL.createObjectURL(await r.blob());$('pairImage').src=pairUrl;
++}
++function run(fn){return async()=>{try{await fn();}catch(e){message(String(e.message||e),true);}};}
++$('showPair').onclick=run(async()=>{
++ const c=await api('/api/connection');$('pairBox').hidden=false;$('hostSelect').replaceChildren();
++ for(const h of c.addresses){const option=text('option',h);option.value=h;$('hostSelect').append(option);}
++ $('manualPair').textContent=`Адрес: ${c.url||'Не определён'}\nКлюч ПК: ${c.deviceKey}\nSHA-256 сертификата ПК: ${c.certificateSha256}`;
++ $('connectionText').textContent=c.url||'ПК не получил локальный адрес. Проверьте подключение к роутеру.';await showQr();
++});
++$('hostSelect').onchange=run(async()=>{const c=await api('/api/connection');const url=`https://${$('hostSelect').value}:${c.lanPort}`;$('connectionText').textContent=url;$('manualPair').textContent=`Адрес: ${url}\nКлюч ПК: ${c.deviceKey}\nSHA-256 сертификата ПК: ${c.certificateSha256}`;await showQr();});
++$('loadCertificates').onclick=run(async()=>{
++ message('Чтение сертификатов с ПК...');certs=(await api('/api/certificates',{})).certificates;
++ $('certificates').replaceChildren(text('option','Выберите сертификат'));$('certificates').options[0].value='';
++ for(const c of certs){const o=text('option',c.subject+' · до '+c.validTo);o.value=c.thumbprint;$('certificates').append(o);}
++ message(certs.length?'Сертификаты найдены. Проверьте организацию.':'Не найдено действующих сертификатов с закрытым ключом.');
++});
++$('certificates').onchange=()=>{const c=certs.find(c=>c.thumbprint===$('certificates').value);$('certDetail').textContent=c?'Отпечаток: '+c.thumbprint:'';};
++$('sign').onclick=run(()=>perform('submit'));$('check').onclick=run(()=>perform('refresh'));
++$('refreshView').onclick=run(refresh);
++$('backup').onclick=run(async()=>message('Копия сохранена: '+(await api('/api/backup',{})).path));
++run(refresh)();setInterval(()=>{if(!document.querySelector('details[open]'))run(refresh)();},4000);
++
++$('cancelUnsent').onclick=run(async()=>{
++ const selected=jobs.filter(j=>chosen.has(j.id));
++ if(!selected.length||selected.some(j=>!['WAITING_SIGNATURE','BLOCKED'].includes(j.status)))throw Error('Отменить можно только выбранные наборы, ещё не отправленные в ЧЗ');
++ if(!confirm(`Отменить ${selected.length} неотправленных наборов? Затем обновите статусы на ТСД: коды можно будет собрать заново с правильным шаблоном.`))return;
++ await api('/api/cancel',{confirmed:true,items:selected.map(j=>({id:j.id,hash:j.payloadHash}))});chosen.clear();await refresh();message('Неотправленные наборы отменены. Обновите статусы на ТСД перед повторной сборкой.');
++});
+--- /dev/null
++++ b/companion_pc/web/index.html
+@@ -0,0 +1,6 @@
++<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ЧЗ · Подпись наборов на ПК</title><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head><body>
++<header><p class="kicker">ТСД → ПК → ЧЕСТНЫЙ ЗНАК</p><h1>Наборы на подпись</h1><p>Получение набора с ТСД <strong>не отправляет</strong> его в ЧЗ. Подпись и отправка — только по вашей кнопке.</p><p id="version"></p></header>
++<main><section><h2>1. Подключить ТСД</h2><p>ПК и ТСД должны находиться в одной локальной сети. Ключ ЧЗ на ТСД не нужен.</p><button id="showPair">Показать подключение / QR</button><div id="pairBox" hidden><p>Выберите адрес ПК, доступный с ТСД:</p><select id="hostSelect"></select><p>На ТСД нажмите «Подключить ПК» и отсканируйте этот QR. Проверьте совпадение адреса на обоих устройствах.</p><img id="pairImage" alt="QR подключения ТСД к этому ПК"><p id="connectionText" class="mono"></p><details><summary>Данные для ручного ввода</summary><pre id="manualPair"></pre></details><p class="warning">QR содержит секрет подключения. Не публикуйте его и не отправляйте посторонним.</p></div></section>
++<section><h2>2. Выбрать подпись</h2><p>Подключите носитель УКЭП. Нужны КриптоПро CSP и установленный компонент КриптоПро ЭЦП (CAdESCOM). PIN вводится только в окне КриптоПро.</p><button id="loadCertificates">Найти сертификаты на ПК</button><select id="certificates"><option value="">Сертификат не выбран</option></select><p id="certDetail"></p></section>
++<section><h2>3. Проверить и отправить</h2><p class="warning">Production — реальный учёт ЧЗ. Первый тест проводите на одном наборе. Не выбирайте сразу разные организации или контуры.</p><div class="actions"><button id="refreshView">Обновить очередь</button><button id="sign" class="primary">Подписать и отправить выбранные в ЧЗ</button><button id="check">Проверить выбранные в ЧЗ</button><button id="cancelUnsent">Отменить выбранные до отправки</button><button id="backup">Резервная копия очереди ПК</button></div><p id="message" role="status"></p><p id="operations"></p><div id="jobs"></div></section>
++<section><h2>Где хранятся данные</h2><p id="dataDir" class="mono"></p><p>Очередь сохраняется на диске ПК и на ТСД. При неизвестном результате отправки автоматического повтора не будет. Ошибки сохраняются отдельно от статуса «Сформирован».</p></section></main></body></html>
+--- /dev/null
++++ b/companion_pc/web/style.css
+@@ -0,0 +1 @@
++:root {color-scheme:light;font:16px/1.55 system-ui,sans-serif;color:#142a3b;background:#f3f6f8}body{margin:0}header,main{max-width:1140px;margin:auto;padding:24px}header{padding-bottom:4px}.kicker{letter-spacing:.1em;font-size:12px;font-weight:700;color:#386578}h1{font-size:34px;margin:4px 0}h2{font-size:21px;margin-top:0}section{background:white;border:1px solid #d8e1e7;padding:22px;margin-bottom:20px;border-radius:12px}button,select{font:inherit;border:1px solid #8398a7;background:#fff;padding:10px 14px;border-radius:6px;margin:4px 5px 4px 0;max-width:100%;cursor:pointer}button:disabled{opacity:.5;cursor:wait}.primary{color:white;background:#16566a;border-color:#16566a}p{margin:8px 0}.warning{background:#fff5dc;padding:12px;border-left:4px solid #c4942f}.mono,pre{font-family:ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}.job{border:1px solid #cedbe3;border-radius:7px;margin:12px 0;padding:14px}.job .title{font-size:17px;font-weight:650}.job label{cursor:pointer}.job input{width:20px;height:20px;vertical-align:middle;margin-right:10px}.meta{color:#496170}.status{font-weight:bold}details{margin-top:8px}summary{cursor:pointer}.error{color:#9e2834}.success{color:#136345}#pairImage{display:block;width:330px;max-width:100%;background:white;margin:15px 0}#message{padding:8px;white-space:pre-wrap}pre{max-height:300px;overflow:auto}#certificates{display:block;width:100%}footer{font-size:13px}
+--- /dev/null
++++ b/tests/kotlin/DomainSmoke.kt
+@@ -0,0 +1,36 @@
++package com.tsd.czsetcollector
++
++/** Runs the actual Android domain code using only a JVM. No Android/CHZ mocks. */
++object DomainSmoke {
++    @JvmStatic fun main(args:Array<String>) {
++        var count=0
++        fun ok(value:Boolean){check(value);count++}
++        fun reject(f:()->Unit){var rejected=false;try{f()}catch(e:IllegalArgumentException){rejected=true};ok(rejected)}
++        val g="04607010740016"
++        val serial="5w02o2iH/agzq"
++        // Synthetic serial; the GTIN is public product metadata. Nothing is submitted.
++        val c="01${g}21$serial"
++        ok(Codes.gtin(g));ok(!Codes.gtin(g.dropLast(1)+"7"));ok(Codes.inn("7707083893"))
++        ok(!Codes.inn("7700000000"));ok(Codes.normalize(c)==c)
++        ok(Codes.normalize("]d2"+c+"\u001d91TEST\u001d92CRYPTO")==c)
++        ok(Codes.normalize(c+"93ABCD")==c)
++        ok(Codes.normalize("(01)${g}(21)$serial")==c)
++        val with91="01${g}21ab91cdEF?%123"
++        ok(with91.length==31);ok(Codes.normalize(with91+"\u001d91KEY")==with91)
++        val quoted="01${g}21a\"b/c%&=<>123"
++        ok(quoted.length==31);ok(Codes.normalize(quoted)==quoted)
++        reject{Codes.normalize("00"+"0".repeat(18))}
++        reject{Codes.normalize("01${g}21short")}
++        reject{Codes.normalize(c+"WRONG")}
++        reject{Codes.normalize("01${g}21"+"я".repeat(13))}
++        ok(Codes.composition("$g=6")==mapOf(g to 6))
++        reject{Codes.composition("$g=0")}
++        reject{Codes.composition("$g=3\n$g=3")}
++        reject{Codes.composition("$g=1001")}
++        reject{Codes.composition("")}
++        val a=Job();val b=Job();a.children.add(c)
++        ok(b.children.isEmpty());ok(a.id!=b.id)
++        ok(Labels.status("VERIFIED").contains("проверен"))
++        println("PASS: $count JVM checks against Domain.kt")
++    }
++}
+--- /dev/null
++++ b/tests/test_core.py
+@@ -0,0 +1,184 @@
++"""Offline tests: synthetic codes only, no real CHZ calls or real signatures."""
++import base64
++import copy
++import json
++from pathlib import Path
++import sqlite3
++import sys
++import tempfile
++import unittest
++import uuid
++from unittest.mock import patch
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'companion_pc'))
++from core import *
++
++
++def gtin(body):
++    assert len(body)==13
++    return body+str((-sum(int(c)*(3 if i%2==0 else 1) for i,c in enumerate(body)))%10)
++SET_GTIN=gtin('0460000000001')
++A=gtin('0460000000002'); B=gtin('0460000000003')
++INN='7707083893' # Public organization INN used only to test checksum; never submitted.
++def cis(g,n): return '01'+g+'21'+str(n).zfill(13)
++def job():
++    return dict(schemaVersion=1,id=str(uuid.uuid4()),environment='sandbox',inn=INN,pg='grocery',
++      template={'setGtin':SET_GTIN,'expected':{A:3,B:3}},setCode=cis(SET_GTIN,1),
++      children=[cis(A,n) for n in (1,2,3)]+[cis(B,n) for n in (4,5,6)])
++
++def infos(j,complete=False):
++    res={j['setCode']:{'cis':j['setCode'],'ownerInn':j['inn'],'status':'INTRODUCED' if complete else 'APPLIED',
++                         'packageType':'SET','emissionType':'LOCAL','child':j['children'] if complete else []}}
++    # Different owner for every unit is intentional OSU scenario.
++    res.update({c:{'cis':c,'ownerInn':'some other supplier','status':'INTRODUCED','packageType':'UNIT'} for c in j['children']})
++    return res
++
++class FakeSigner:
++    def __init__(self): self.calls=[]
++    def sign(self,content,detached):
++        self.calls.append((content,detached))
++        return base64.b64encode(b'MOCK-SIGNATURE-NOT-FOR-PRODUCTION'+content).decode()
++
++class FakeApi:
++    def __init__(self,j):
++        self.j=j;self.sent=[];self.complete=False;self.doc_status='IN_PROGRESS';self.raise_on_post=False
++    def codes(self,cs):
++        available=infos(self.j,self.complete);return {c:available[c] for c in cs}
++    def call(self,method,path,payload):
++        assert method=='POST' and path=='/lk/documents/create?pg=grocery'
++        self.sent.append(copy.deepcopy(payload))
++        if self.raise_on_post: raise ApiError('timeout after request was transmitted')
++        return str(uuid.uuid4())
++    def document_info(self,*args): return {'status':self.doc_status}
++
++class ContractTests(unittest.TestCase):
++    def test_gtin_and_inn(self):
++        self.assertTrue(valid_gtin(A));self.assertFalse(valid_gtin(A[:-1]+str((int(A[-1])+1)%10)))
++        self.assertTrue(valid_inn(INN));self.assertFalse(valid_inn('7700000000'))
++    def test_code_normalization(self):
++        c=cis(A,1)
++        for raw in (c,']d2'+c,']Q3'+c,c+'\x1d91TEST\x1d92CRYPT',c+'93ABCD','(01)'+A+'(21)'+'1'.zfill(13)):
++            self.assertEqual(normalize_code(raw),c)
++    def test_91_inside_serial_not_truncated(self):
++        c='01'+A+'21'+'ab91cdEF?%123'
++        c=c+'4' if len(c)==30 else c
++        self.assertEqual(len(c),31);self.assertEqual(normalize_code(c+'\x1d91SIGN'),c)
++    def test_quotes_and_special_chars_preserved(self):
++        c='01'+A+'21'+'a"b/c%&=<>123'
++        self.assertEqual(len(c),31);self.assertEqual(normalize_code(c),c)
++        self.assertEqual(json.loads(dumps({'c':c}))['c'],c)
++    def test_bad_codes(self):
++        for raw in (None,42,'1234567890123','00'+'0'*18, '01'+A+'21short',cis(A,1)+'WRONG','01'+A+'21'+'я'*13):
++            with self.subTest(raw=raw),self.assertRaises(ValidationError): normalize_code(raw)
++    def test_exact_payload_and_signature(self):
++        j=job();content=product_bytes(j);doc=json.loads(content)
++        self.assertEqual(doc,{'participantId':INN,'aggregationUnits':[{'unitSerialNumber':j['setCode'],'sntins':j['children']}]})
++        sig=FakeSigner().sign(content,True);e=make_envelope(content,sig)
++        self.assertEqual(e['type'],'SETS_AGGREGATION');self.assertEqual(e['document_format'],'MANUAL')
++        self.assertEqual(base64.b64decode(e['product_document']),content)
++        self.assertNotIn('aggregationType',doc['aggregationUnits'][0])
++    def test_no_empty_signature(self):
++        for sig in ('','plain text','!!!!',None):
++            with self.assertRaises(ValidationError):make_envelope(b'{}',sig)
++    def test_incomplete_wrong_duplicate_rejected(self):
++        for mutate in (lambda j:j['children'].pop(),lambda j:j['children'].__setitem__(0,j['children'][1]),
++           lambda j:j.update(pg='milk'),lambda j:j.update(environment='https://attacker'),
++           lambda j:j['template']['expected'].update({A:True}),lambda j:j.update(setCode=cis(A,9)),
++           lambda j:j.update(inn='7700000000')):
++            j=job();mutate(j)
++            with self.assertRaises(ValidationError):validate_job(j)
++    def test_osu_different_owner_allowed(self):
++        j=job();preflight(j,infos(j))
++    def test_parent_must_belong_to_signer(self):
++        j=job();i=infos(j);i[j['setCode']]['ownerInn']='not user'
++        with self.assertRaises(ValidationError):preflight(j,i)
++    def test_nested_and_retired_blocked(self):
++        for key,value in [('parent','other'),('status','RETIRED'),('packageType','BOX')]:
++            j=job();i=infos(j);i[j['children'][0]][key]=value
++            with self.assertRaises(ValidationError):preflight(j,i)
++    def test_verification_exact_children(self):
++        j=job();i=infos(j,True);verify_set(j,i)
++        i[j['setCode']]['child']=j['children'][:-1]
++        with self.assertRaises(ValidationError):verify_set(j,i)
++        i[j['setCode']].pop('child')
++        with self.assertRaises(ValidationError):verify_set(j,i)
++    def test_document_unknown_not_success(self):
++        self.assertEqual(document_status({})[0],'UNRECOGNIZED')
++    def test_authentication_uses_random_challenge_attached(self):
++        for field in ('token','uuidToken'):
++            api=TrueApi('sandbox');signer=FakeSigner();u=str(uuid.uuid4())
++            with patch.object(api,'call',side_effect=[{'uuid':u,'data':'challenge-Привет'},{field:'returned-token'}]) as calls:
++                api.authenticate(signer,INN)
++            self.assertEqual(signer.calls,[('challenge-Привет'.encode(),False)])
++            args=calls.call_args_list[1].args
++            self.assertEqual(args[2]['uuid'],u);self.assertTrue(args[2]['unitedToken']);self.assertEqual(api.token,'returned-token')
++    def test_document_info_v4(self):
++        a=TrueApi('sandbox');u=str(uuid.uuid4())
++        with patch.object(a,'call',return_value={}) as call:a.document_info(u)
++        self.assertEqual(call.call_args.kwargs['version'],4)
++    def test_host_allowlist(self):
++        with self.assertRaises(KeyError):TrueApi('https://example.com')
++
++class StoreTests(unittest.TestCase):
++    def setUp(self):
++        self.temp=tempfile.TemporaryDirectory();self.path=Path(self.temp.name)/'queue.sqlite3';self.store=Store(self.path);self.j=job()
++    def tearDown(self):self.temp.cleanup()
++    def test_enqueue_no_sign_no_submit(self):
++        got=self.store.enqueue(self.j);self.assertEqual(got['status'],'WAITING_SIGNATURE');self.assertIsNone(got['documentId'])
++    def test_upload_idempotency(self):
++        a=self.store.enqueue(self.j);b=self.store.enqueue(self.j);self.assertEqual(a['payloadHash'],b['payloadHash']);self.assertEqual(len(self.store.all()),1)
++    def test_same_id_changed_payload_rejected(self):
++        self.store.enqueue(self.j);other=copy.deepcopy(self.j);other['children'][0]=cis(A,99)
++        with self.assertRaises(ValidationError):self.store.enqueue(other)
++    def test_code_reserved_across_jobs(self):
++        self.store.enqueue(self.j);other=copy.deepcopy(self.j);other['id']=str(uuid.uuid4());other['setCode']=cis(SET_GTIN,99)
++        with self.assertRaises(ValidationError):self.store.enqueue(other)
++    def test_restart_keeps_data(self):
++        self.store.enqueue(self.j);other=Store(self.path);self.assertEqual(other.get(self.j['id'])['children'],self.j['children'])
++    def test_crash_during_submission_becomes_unknown(self):
++        self.store.enqueue(self.j);self.store.change(self.j['id'],'SUBMITTING');other=Store(self.path)
++        self.assertEqual(other.get(self.j['id'])['status'],'UNKNOWN')
++    def test_local_cancel_releases_codes(self):
++        a=self.store.enqueue(self.j);self.store.cancel_unsent(a['id'],a['payloadHash']);other=copy.deepcopy(self.j);other['id']=str(uuid.uuid4())
++        self.assertEqual(self.store.enqueue(other)['status'],'WAITING_SIGNATURE')
++    def test_cannot_cancel_sent_or_unknown(self):
++        a=self.store.enqueue(self.j);self.store.change(a['id'],'UNKNOWN')
++        with self.assertRaises(ValidationError):self.store.cancel_unsent(a['id'],a['payloadHash'])
++    def test_backup_restores(self):
++        self.store.enqueue(self.j);dest=Path(self.temp.name)/'backup.db';self.store.backup(dest)
++        self.assertEqual(Store(dest).get(self.j['id'])['children'],self.j['children'])
++    def test_http_success_is_not_formation_success(self):
++        a=self.store.enqueue(self.j);api=FakeApi(self.j);signer=FakeSigner();engine=Engine(self.store)
++        result=engine.submit(a['id'],api,signer)
++        self.assertEqual(result['status'],'PROCESSING');self.assertEqual(len(api.sent),1);self.assertTrue(signer.calls[0][1])
++        with self.assertRaises(ValidationError):engine.submit(a['id'],api,signer)
++        self.assertEqual(len(api.sent),1)
++    def test_full_success_requires_document_and_composition(self):
++        a=self.store.enqueue(self.j);api=FakeApi(self.j);engine=Engine(self.store);engine.submit(a['id'],api,FakeSigner())
++        api.doc_status='CHECKED_OK'
++        self.assertEqual(engine.refresh(a['id'],api)['status'],'CHECK_REQUIRED')
++        api.complete=True
++        self.assertEqual(engine.refresh(a['id'],api)['status'],'VERIFIED')
++    def test_timeout_never_auto_retries(self):
++        a=self.store.enqueue(self.j);api=FakeApi(self.j);api.raise_on_post=True;engine=Engine(self.store)
++        with self.assertRaises(ApiError):engine.submit(a['id'],api,FakeSigner())
++        self.assertEqual(self.store.get(a['id'])['status'],'UNKNOWN')
++        with self.assertRaises(ValidationError):engine.submit(a['id'],api,FakeSigner())
++        self.assertEqual(len(api.sent),1)
++    def test_unknown_reconciled_read_only(self):
++        a=self.store.enqueue(self.j);self.store.change(a['id'],'UNKNOWN');api=FakeApi(self.j);api.complete=True
++        self.assertEqual(Engine(self.store).refresh(a['id'],api)['status'],'VERIFIED');self.assertEqual(api.sent,[])
++    def test_rejected_cannot_resubmit(self):
++        a=self.store.enqueue(self.j);api=FakeApi(self.j);api.doc_status='CHECKED_NOT_OK';e=Engine(self.store)
++        self.assertEqual(e.submit(a['id'],api,FakeSigner())['status'],'REJECTED')
++        with self.assertRaises(ValidationError):e.submit(a['id'],api,FakeSigner())
++    def test_preflight_failure_no_post(self):
++        a=self.store.enqueue(self.j);api=FakeApi(self.j)
++        bad=infos(self.j);bad[self.j['children'][0]]['status']='RETIRED'
++        with patch.object(api,'codes',return_value=bad),self.assertRaises(ValidationError):Engine(self.store).submit(a['id'],api,FakeSigner())
++        self.assertEqual(api.sent,[]);self.assertEqual(self.store.get(a['id'])['status'],'BLOCKED')
++    def test_signer_cancel_keeps_queue(self):
++        a=self.store.enqueue(self.j);api=FakeApi(self.j);s=FakeSigner()
++        with patch.object(s,'sign',side_effect=RuntimeError('PIN cancelled')),self.assertRaises(RuntimeError):Engine(self.store).submit(a['id'],api,s)
++        self.assertEqual(self.store.get(a['id'])['children'],self.j['children']);self.assertEqual(api.sent,[])
++
++if __name__=='__main__':unittest.main()
+--- /dev/null
++++ b/tests/test_http.py
+@@ -0,0 +1,72 @@
++"""Loopback integration tests, real HTTP/TLS and SQLite, NO connection to CHZ."""
++import http.client
++import json
++from pathlib import Path
++import socket
++import ssl
++import sys
++import tempfile
++import threading
++import unittest
++from unittest.mock import patch
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'companion_pc'))
++from server import Server,Handler,State,is_lan_v4
++from transport import setup
++from test_core import job
++
++class HttpTests(unittest.TestCase):
++    def setUp(self):
++        self.tmp=tempfile.TemporaryDirectory();d=Path(self.tmp.name);self.config=setup(d)
++        self.state=State(d,self.config,'192.168.1.10')
++        self.admin=Server(('127.0.0.1',0),Handler);self.admin.state=self.state;self.admin.lane='admin'
++        self.lan=Server(('127.0.0.1',0),Handler);self.lan.state=self.state;self.lan.lane='lan'
++        self.lan.socket=self.config['sslContext'].wrap_socket(self.lan.socket,server_side=True)
++        self.config['adminPort']=self.admin.server_port;self.config['lanPort']=self.lan.server_port
++        for s in (self.admin,self.lan):threading.Thread(target=s.serve_forever,daemon=True).start()
++    def tearDown(self):
++        for s in (self.admin,self.lan):s.shutdown();s.server_close()
++        self.state.worker.shutdown(wait=True);self.tmp.cleanup()
++    def request(self,lan,path,body=None,auth=True,extra=None):
++        s=self.lan if lan else self.admin
++        if lan:
++            ctx=ssl.create_default_context(cafile=str(Path(self.tmp.name)/'tls.crt'))
++            c=http.client.HTTPSConnection('127.0.0.1',s.server_port,context=ctx,timeout=3)
++        else:c=http.client.HTTPConnection('127.0.0.1',s.server_port,timeout=3)
++        headers={'Content-Type':'application/json'}
++        if auth:headers.update({'Authorization':'Bearer '+self.config['deviceKey']} if lan else {'X-Admin-Key':self.state.admin_key})
++        if extra:headers.update(extra)
++        c.request('GET' if body is None else 'POST',path,body=None if body is None else json.dumps(body),headers=headers)
++        r=c.getresponse();data=r.read();status=r.status;c.close();return status,data
++    def test_tls_inbox_accepts_but_never_signs(self):
++        j=job()
++        with patch('server.WindowsSigner') as signer,patch('server.TrueApi') as api:
++            code,raw=self.request(True,'/v1/jobs',j)
++            self.assertEqual(code,200);self.assertEqual(json.loads(raw)['status'],'WAITING_SIGNATURE')
++            signer.assert_not_called();api.assert_not_called()
++    def test_unauthorized_inbox(self):
++        self.assertEqual(self.request(True,'/v1/jobs',job(),False)[0],401);self.assertEqual(self.state.store.all(),[])
++    def test_lan_has_no_signing_endpoint(self):
++        self.assertEqual(self.request(True,'/api/submit',{'confirmed':True})[0],404)
++        self.assertEqual(self.request(True,'/api/certificates',{})[0],404)
++    def test_admin_requires_secret(self):
++        self.assertEqual(self.request(False,'/api/state',auth=False)[0],401)
++    def test_admin_rejects_cross_origin(self):
++        self.assertEqual(self.request(False,'/api/state',extra={'Origin':'https://evil.example'})[0],403)
++    def test_admin_dns_rebinding_blocked(self):
++        self.assertEqual(self.request(False,'/api/state',extra={'Host':'evil.example'})[0],403)
++    def test_admin_requires_explicit_confirmation(self):
++        self.assertEqual(self.request(False,'/api/submit',{'confirmed':False})[0],400)
++    def test_qr_and_pairing_persist(self):
++        status,raw=self.request(False,'/api/connection');self.assertEqual(status,200);pair=json.loads(raw)
++        self.assertTrue(pair['pairing'].startswith('CZPAIR1:'));self.assertEqual(len(pair['certificateSha256']),64)
++        c2=setup(Path(self.tmp.name));self.assertEqual(c2['deviceKey'],self.config['deviceKey']);self.assertEqual(c2['certificateSha256'],self.config['certificateSha256'])
++        code,svg=self.request(False,'/api/pair.svg');self.assertEqual(code,200);self.assertIn(b'<svg',svg)
++    def test_upload_idempotency_over_tls(self):
++        j=job();self.request(True,'/v1/jobs',j);self.request(True,'/v1/jobs',j)
++        self.assertEqual(len(self.state.store.all()),1)
++        self.assertEqual(self.request(True,'/v1/jobs/'+j['id'])[0],200)
++    def test_lan_addresses(self):
++        for ip in ('192.168.0.1','172.16.0.1','10.0.0.1'):self.assertTrue(is_lan_v4(ip))
++        for ip in ('127.0.0.1','0.0.0.0','203.0.113.1','8.8.8.8','::1','169.254.1.1'):self.assertFalse(is_lan_v4(ip))
++
++if __name__=='__main__':unittest.main()
