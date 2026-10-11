@@ -19,7 +19,7 @@ function Invoke-ChzNative([string]$Exe,[string[]]$Arguments,[int]$Timeout=60000)
     $memory=New-Object IO.MemoryStream
     $copy=$proc.StandardOutput.BaseStream.CopyToAsync($memory)
     $errors=$proc.StandardError.ReadToEndAsync()
-    if(!$proc.WaitForExit($Timeout)) { $proc.Kill();throw 'Tool timed out; no installation performed' }
+    if(!$proc.WaitForExit($Timeout)) { $proc.Kill();throw 'Tool timed out; result unknown. Check installed version before retry. No destructive retry performed.' }
     [void]$copy.GetAwaiter().GetResult(); $errorText=$errors.GetAwaiter().GetResult()
     $bytes=$memory.ToArray();$memory.Dispose()
     $code=$proc.ExitCode;$proc.Dispose()
@@ -31,7 +31,7 @@ function Get-ChzAdb {
     if(!(Test-Path -LiteralPath $adb)) {
         $found=Get-Command adb.exe -ErrorAction SilentlyContinue
         if($found){return $found.Source}
-        throw 'Bundled ADB not found. Extract the complete CHZ-1.3.1-Windows-Safe.zip first.'
+        throw 'Bundled ADB not found. Extract the complete CHZ-1.3.2-Windows-Safe.zip first.'
     }
     return $adb
 }
@@ -82,4 +82,18 @@ function Assert-ChzEnvelope([string]$Path,[string]$Format) {
     $e=$raw | ConvertFrom-Json
     if($e.format -ne $Format -or $e.version -ne 1 -or (Get-ChzHash $e.payloadJson) -ne $e.sha256){throw 'Backup integrity check failed'}
     return $e.payloadJson
+}
+function Get-ChzCanonicalJson($Value) {
+    if($null -eq $Value){return 'null'}
+    if($Value -is [pscustomobject]){
+        $parts=@(foreach($p in @($Value.PSObject.Properties|Sort-Object Name)){
+            ($p.Name|ConvertTo-Json -Compress)+':'+(Get-ChzCanonicalJson $p.Value)
+        })
+        return '{'+($parts -join ',')+'}'
+    }
+    if($Value -is [array]){
+        $parts=@(foreach($item in $Value){Get-ChzCanonicalJson $item})
+        return '['+($parts -join ',')+']'
+    }
+    return ($Value|ConvertTo-Json -Compress)
 }

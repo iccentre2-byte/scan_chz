@@ -33,6 +33,38 @@ object Codes {
         require(gtin(head.substring(2,16))){"Ошибочная контрольная цифра GTIN"}
         return head
     }
+    /** Profile setup extracts AI (01) only; collection still uses the strict unit-code parser above. */
+    fun profileGtin(raw:String):String {
+        require(raw.length<=4096){"Слишком длинный код для GTIN"}
+        val value=raw.trim(' ','\r','\n','\t').replaceFirst(Regex("^\\][A-Za-z][0-9]"),"")
+        val candidate=when {
+            value.matches(Regex("[0-9]{14}"))->value
+            value.startsWith("(01)")-> {
+                val m=Regex("^\\(01\\)([0-9]{14})(?:$|\\([0-9]{2,4}\\).*)",RegexOption.DOT_MATCHES_ALL).matchEntire(value)
+                require(m!=null){"В коде нет однозначного GTIN после (01)"};m.groupValues[1]
+            }
+            value.startsWith("01")-> {
+                require(value.length>=16){"Неполный GTIN после 01"}
+                val tail=value.drop(16)
+                require(tail.isEmpty() || tail.startsWith('\u001d') ||
+                    Regex("(?:10|11|13|15|17|21|22|30|37|91|92|93).+",RegexOption.DOT_MATCHES_ALL).matches(tail)) {
+                    "В коде нет однозначного GTIN после 01"
+                }
+                value.substring(2,16)
+            }
+            value.startsWith("https://") || value.startsWith("http://")-> {
+                val uri=try{java.net.URI(value)}catch(e:Exception){throw IllegalArgumentException("Некорректный QR GS1",e)}
+                require(!uri.host.isNullOrBlank() && uri.userInfo==null){"Некорректный QR GS1"}
+                val parts=uri.rawPath.orEmpty().split('/')
+                val identifiers=parts.indices.filter{parts[it]=="01"}
+                require(identifiers.size==1 && identifiers[0]+1<parts.size){"QR должен содержать один GTIN в пути /01/GTIN"}
+                parts[identifiers[0]+1]
+            }
+            else->throw IllegalArgumentException("Нужны 14 цифр GTIN или код GS1 с идентификатором 01")
+        }
+        require(gtin(candidate)){"Проверьте 14 цифр GTIN и контрольную цифру"}
+        return candidate
+    }
     fun composition(text: String): Map<String,Int> {
         val result=linkedMapOf<String,Int>()
         for(line in text.lines().map{it.trim()}.filter{it.isNotEmpty()}) {

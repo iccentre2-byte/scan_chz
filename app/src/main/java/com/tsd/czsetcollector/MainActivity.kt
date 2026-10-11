@@ -46,6 +46,8 @@ class MainActivity:AppCompatActivity() {
     private val work=WorkSession()
     private var dialogDepth=0
     private var editorOpen=false
+    private var editingIndex:Int?=null
+    private var editorScanTarget:GtinInput?=null
     private var lastCode=""
     private var lastCodeAt=0L
     private var keyboardSuppressed=false
@@ -115,7 +117,7 @@ class MainActivity:AppCompatActivity() {
         super.onCreate(savedInstanceState);b=ActivityMainBinding.inflate(layoutInflater);setContentView(b.root)
         prefs=getSharedPreferences("cz_multi_profiles",Context.MODE_PRIVATE);store=QueueStore(filesDir);profileStore=ProfileStore(prefs,filesDir)
         b.tvLog.movementMethod=ScrollingMovementMethod()
-        b.tvAppVersion.text="1.3.1 · Профиль → Сборка · Поток"
+        b.tvAppVersion.text="${BuildConfig.VERSION_NAME} · Профиль → Сборка · Поток"
         try {snapshot=store.load()} catch(e:Exception){storageFailure(e)}
         try {pc=gson.fromJson(prefs.getString("pc_connection",null),PcConfig::class.java)?:PcConfig()}catch(e:Exception){pc=PcConfig()}
         b.spinnerEnvironment.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,
@@ -126,17 +128,18 @@ class MainActivity:AppCompatActivity() {
                 when {
                     pairMode -> {pairMode=false;pauseFlow();render()}
                     work.profile!=null -> requestProfilePage()
-                    editorOpen -> {editorOpen=false;applyProfile(profiles[selected]);render()}
+                    editorOpen -> closeProfileEditor()
                     else -> {isEnabled=false;onBackPressedDispatcher.onBackPressed();isEnabled=true}
                 }
             }
         })
-        log("Запуск 1.3.1. Профиль зафиксирован при входе в сборку. Подпись только на ПК.")
+        log("Запуск ${BuildConfig.VERSION_NAME}. Профиль зафиксирован при входе в сборку. Подпись только на ПК.")
         handleStagedMigration(intent)
+        handleBackupRequest(intent)
     }
     override fun onNewIntent(intent:Intent?) {
         super.onNewIntent(intent)
-        if(intent!=null){setIntent(intent);handleStagedMigration(intent)}
+        if(intent!=null){setIntent(intent);handleStagedMigration(intent);handleBackupRequest(intent)}
     }
     override fun onResume(){
         super.onResume();foreground=true
@@ -159,19 +162,38 @@ class MainActivity:AppCompatActivity() {
     private fun listeners(){
         b.spinnerProfiles.onItemSelectedListener=object:AdapterView.OnItemSelectedListener{
             override fun onItemSelected(parent:AdapterView<*>?,view:View?,position:Int,id:Long){
-                if(work.profile!=null || halted || position !in profiles.indices)return
+                if(work.profile!=null || halted || editorOpen || position !in profiles.indices)return
                 selected=position;prefs.edit().putInt("selected_profile_index",position).apply();applyProfile(profiles[position]);render()
             }
             override fun onNothingSelected(parent:AdapterView<*>?){}
         }
         b.btnSaveProfile.setOnClickListener {attempt{
             check(work.profile==null && snapshot.current==null){"Профиль заблокирован на время работы"}
-            saveProfile(inputProfile());editorOpen=false;render();log("Профиль и состав сохранены")
+            saveProfile(inputProfile());closeProfileEditor();log("Профиль и состав сохранены")
         }}
         b.btnEditProfile.setOnClickListener {
             if(work.profile!=null || snapshot.current!=null)return@setOnClickListener
-            editorOpen=!editorOpen;applyProfile(profiles[selected]);render()
+            if(editorOpen)closeProfileEditor()else openProfileEditor(profiles[selected],selected)
         }
+        b.btnNewProfile.setOnClickListener {
+            if(work.profile!=null || snapshot.current!=null || halted)return@setOnClickListener
+            val base=profiles[selected]
+            openProfileEditor(OrganizationProfile(inn=base.inn,environment=base.environment,
+                title=ProfileEditing.availableTitle("Новый профиль",profiles)),null)
+        }
+        b.btnDuplicateProfile.setOnClickListener {
+            if(work.profile!=null || snapshot.current!=null || halted)return@setOnClickListener
+            val base=profiles[selected]
+            openProfileEditor(base.copy(title=ProfileEditing.availableTitle(base.title+" (копия)",profiles),
+                template=base.template.copy(expected=base.template.expected.toMap())),null)
+        }
+        b.etSetGtin.setOnFocusChangeListener{_,focused->if(focused && editorOpen)selectEditorTarget(b.etSetGtin,"GTIN набора")}
+        b.btnScanSetGtin.setOnClickListener{startEditorScan(b.etSetGtin,"GTIN набора")}
+        b.compositionEditor.onTarget={field,label->selectEditorTarget(field,label)}
+        b.compositionEditor.onScan={field,label->startEditorScan(field,label)}
+        b.compositionEditor.onError={toast(it)}
+        b.btnAddCompositionRow.setOnClickListener{attempt{b.compositionEditor.addRow().requestFocus()}}
+        b.btnBackupAll.setOnClickListener{showBackupDialog()}
         b.btnStartWork.setOnClickListener {attempt{
             val p=if(editorOpen)inputProfile() else profiles[selected]
             work.enter(p,snapshot.current)
@@ -179,21 +201,22 @@ class MainActivity:AppCompatActivity() {
                 if(editorOpen)saveProfile(p)
                 check(prefs.edit().putString("work_session_profile",gson.toJson(work.profile)).commit()) {"Не удалось сохранить выбранный профиль"}
             } catch(e:Exception) {work.leave(null);throw e}
-            editorOpen=false;clearScanInput();hideKeyboard();render()
+            editorOpen=false;editingIndex=null;editorScanTarget=null;clearScanInput();hideKeyboard();render()
             b.workPage.scrollTo(0,0);b.etScanInput.requestFocus()
             log("Начата работа: ${p.title}. Профиль нельзя переключить внутри сборки.")
         }}
         b.btnBackProfiles.setOnClickListener {requestProfilePage()}
         b.btnFlow.setOnClickListener {if(work.streaming)pauseFlow() else attempt{startFlow()}}
         b.btnDeleteProfile.setOnClickListener {
-            if(work.profile!=null || snapshot.current!=null)return@setOnClickListener
+            if(work.profile!=null || snapshot.current!=null || editingIndex==null)return@setOnClickListener
             if(profiles.size<=1){toast("Единственный профиль не удаляется");return@setOnClickListener}
             guardDialog().setTitle("Удалить профиль?").setMessage("Собранные наборы останутся в очереди со своим ИНН и составом.")
                 .setNegativeButton("Отмена",null).setPositiveButton("Удалить"){_,_->
                     attempt{
-                        val next=profiles.toMutableList().apply{removeAt(selected)}
+                        val at=checkNotNull(editingIndex)
+                        val next=profiles.toMutableList().apply{removeAt(at)}
                         profileStore.repository.save(ProfileData(next,0))
-                        profiles.clear();profiles.addAll(next);selected=0;profileSpinner()
+                        profiles.clear();profiles.addAll(next);selected=0;profileSpinner();closeProfileEditor()
                     }
                 }.show()
         }
@@ -266,18 +289,25 @@ class MainActivity:AppCompatActivity() {
         b.spinnerEnvironment.setSelection(if(p.environment=="sandbox")1 else 0)
         val template=p.template
         b.etSetGtin.setText(template.setGtin)
-        b.etComposition.setText(template.expected.entries.joinToString("\n"){"${it.key}=${it.value}"})
+        b.compositionEditor.show(template.expected)
         if(p.pg!="grocery")log("В старом профиле была группа ${p.pg}. В этой версии только grocery; проверьте товары перед сохранением.")
     }
     private fun inputProfile():OrganizationProfile {
         val inn=b.etInn.text.toString().trim();require(Codes.inn(inn)){"Проверьте ИНН и контрольные цифры"}
         val title=b.etProfileTitle.text.toString().trim();require(title.isNotBlank()){"Назовите профиль, например «Кириешки 6 / ИП»"}
-        val gtin=b.etSetGtin.text.toString().trim();require(Codes.gtin(gtin)){"Заполните 14-значный GTIN НАБОРА из Национального каталога"}
+        val gtin=b.etSetGtin.validated()
         return OrganizationProfile(inn,"grocery",title,if(b.spinnerEnvironment.selectedItemPosition==1)"sandbox" else "production",
-            Template(gtin,Codes.composition(b.etComposition.text.toString())))
+            Template(gtin,b.compositionEditor.composition()))
     }
     private fun scan(raw:String){
         if(halted || !foreground || dialogDepth>0)return
+        if(editorOpen && work.profile==null && !pairMode){
+            attempt{
+                val target=checkNotNull(editorScanTarget){"Нажмите «Скан» рядом с GTIN набора или пачки"}
+                require(target.isShown && target.isEnabled){"Выберите поле GTIN для сканирования"}
+                target.scan(raw);stopSoftwareScanTrigger();toast("GTIN сохранён; серийный номер исключён")
+            };return
+        }
         if(pairMode){pairMode=false;pauseFlow();attempt{
             require(raw.length<=4096){"Слишком длинный QR подключения"};val code=Codes.withoutPrefix(raw);require(code.startsWith("CZPAIR1:")){"Это не QR подключения из помощника ПК"}
             val decoded=String(Base64.decode(code.removePrefix("CZPAIR1:"),Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING),Charsets.UTF_8)
@@ -387,9 +417,12 @@ class MainActivity:AppCompatActivity() {
         b.btnStartWork.text=if(editorOpen)"Сохранить и начать работу" else "Начать работу"
         b.btnStartWork.isEnabled=p==null&&!halted
         b.btnEditProfile.isEnabled=!locked
+        b.btnNewProfile.isEnabled=!locked&&!editorOpen
+        b.btnDuplicateProfile.isEnabled=!locked&&!editorOpen
+        b.btnBackupAll.isEnabled=!halted&&!networkBusy&&!editorOpen
         b.btnExportProfiles.isEnabled=!halted
-        b.btnImportProfiles.isEnabled=p==null&&!halted
-        b.btnImportQueue.isEnabled=p==null&&!halted&&snapshot.current==null&&snapshot.jobs.isEmpty()
+        b.btnImportProfiles.isEnabled=p==null&&!halted&&!editorOpen
+        b.btnImportQueue.isEnabled=p==null&&!halted&&!editorOpen&&snapshot.current==null&&snapshot.jobs.isEmpty()
         val chosen=profiles.getOrNull(selected)
         b.tvProfileSummary.text=chosen?.let{"${it.title}\nИНН: ${it.inn.ifBlank{"не заполнен"}}\n${if(it.environment=="sandbox")"ТЕСТОВЫЙ контур" else "РЕАЛЬНЫЙ ЧЗ"}\nGTIN набора: ${it.template.setGtin.ifBlank{"не заполнен"}} · ${it.template.expected.values.sum()} шт"}?:"Выберите профиль"
         b.tvWorkProfile.text=p?.let{"${it.title}\nИНН ${it.inn} · ${if(it.environment=="sandbox")"ТЕСТОВЫЙ контур" else "РЕАЛЬНЫЙ ЧЗ"}\nПрофиль зафиксирован до выхода из сборки"}?:""
@@ -400,7 +433,9 @@ class MainActivity:AppCompatActivity() {
         b.btnResetCurrentSet.isEnabled=j!=null&&!halted
         b.root.keepScreenOn=work.streaming
 
-        listOf<View>(b.spinnerProfiles,b.etProfileTitle,b.etInn,b.spinnerEnvironment,b.etSetGtin,b.etComposition,b.btnSaveProfile,b.btnDeleteProfile).forEach{it.isEnabled=!locked}
+        listOf<View>(b.etProfileTitle,b.etInn,b.spinnerEnvironment,b.etSetGtin,b.compositionEditor,b.btnScanSetGtin,b.btnAddCompositionRow,b.btnSaveProfile).forEach{it.isEnabled=!locked}
+        b.spinnerProfiles.isEnabled=!locked&&!editorOpen
+        b.btnDeleteProfile.isEnabled=!locked&&editingIndex!=null
         b.tvConnection.text=if(pc.url.isBlank())"ПК не подключён" else "ПК: ${pc.url}"
         b.tvScanState.text=if(halted)"ОСТАНОВЛЕНО: ошибка сохранения" else if(pairMode)"Сканируйте QR подключения ПК" else if(j==null)"Сканируйте DataMatrix НАБОРА" else "Сканируйте пачки: ${j.children.size} / ${j.template.expected.values.sum()}"
         b.tvCurrentSet.text=j?.let{"Набор: ${it.setCode}\nИНН ${it.inn} · ${it.environment}"}?:"Текущий набор не открыт"
@@ -445,11 +480,47 @@ class MainActivity:AppCompatActivity() {
         return Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
             .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(bytes)).toString()
     }
+    private fun handleBackupRequest(request:Intent?) {
+        if(request?.getBooleanExtra("chz_export_backup",false)!=true)return
+        request.removeExtra("chz_export_backup")
+        attempt{
+            val requestId=request.getStringExtra("chz_backup_request") ?: java.util.UUID.randomUUID().toString()
+            request.removeExtra("chz_backup_request")
+            showBackupDialog(requestId)
+        }
+    }
+    private fun showBackupDialog(requestId:String=java.util.UUID.randomUUID().toString()) {attempt{
+        require(requestId.length<=64 && requestId.matches(Regex("[A-Za-z0-9-]+"))){"Неверный идентификатор запроса резервной копии"}
+        check(!halted && !networkBusy && !editorOpen && dialogDepth==0){"Сначала сохраните или закройте редактор и дождитесь завершения связи с ПК"}
+        guardDialog().setTitle("Сохранить резервную копию?")
+            .setMessage("Будут сохранены все профили, составы и очередь, включая незавершённый набор и статусы отправки. Ключ подключения к ПК и КЭП исключены. Сканирование останется на паузе.")
+            .setNegativeButton("Отмена",null).setPositiveButton("Сохранить копию"){_,_->attempt{exportCompleteBackup(requestId)}}.show()
+    }}
+    private fun exportCompleteBackup(requestId:String) {
+        check(!halted && !networkBusy && !editorOpen){"Дождитесь завершения связи с ПК и закройте редактор"}
+        val savedProfiles=readStoredProfiles();val savedQueue=readStoredQueue()
+        val profilesJson=ProfileBackup.encode(savedProfiles);val queueJson=QueueBackup.encode(savedQueue)
+        val dir=File(checkNotNull(getExternalFilesDir(null)){"Недоступна папка копии"},"backup")
+        check(dir.isDirectory || dir.mkdirs()){"Не удалось создать папку копии"}
+        fun write(file:File,value:String) {
+            val atomic=AtomicFile(file);val stream=atomic.startWrite()
+            try{stream.write(value.toByteArray(Charsets.UTF_8));atomic.finishWrite(stream)}
+            catch(e:Exception){atomic.failWrite(stream);throw e}
+            require(String(atomic.readFully(),Charsets.UTF_8)==value){"Не удалось проверить сохранённую копию"}
+        }
+        val profilesFile=File(dir,"chz-profiles-backup.json");val queueFile=File(dir,"chz-queue-backup.json")
+        write(profilesFile,profilesJson);write(queueFile,queueJson)
+        require(readStoredProfiles()==savedProfiles && readStoredQueue()==savedQueue){"Данные изменились во время экспорта; сохраните копию ещё раз"}
+        val result=CompleteBackup.verifiedResult(savedProfiles,savedQueue,readStaged(profilesFile),readStaged(queueFile),requestId)
+        write(File(dir,"backup-result.json"),result)
+        log("Копия профилей и очереди сохранена и проверена. Профилей: ${savedProfiles.profiles.size}; готовых наборов: ${savedQueue.jobs.size}.")
+        toast("Резервная копия сохранена и проверена. Можно скопировать её на ПК.")
+    }
     private fun handleStagedMigration(request:Intent?) {
         if(request?.getBooleanExtra("chz_import_staged",false)!=true)return
         request.removeExtra("chz_import_staged") // Rotation must not open a second confirmation.
         attempt{
-            check(!halted && work.profile==null && !networkBusy && dialogDepth==0) { "Перенос заблокирован во время рабочей сессии или диалога. Сначала выйдите к профилям" }
+            check(!halted && work.profile==null && !networkBusy && !editorOpen && dialogDepth==0) { "Перенос заблокирован во время рабочей сессии или редактирования. Сначала выйдите к профилям" }
             pauseFlow()
             val external=checkNotNull(getExternalFilesDir(null)){"Недоступна папка переноса"}
             val dir=File(external,"migration")
@@ -460,7 +531,7 @@ class MainActivity:AppCompatActivity() {
             guardDialog().setTitle("Перенести сохранённые данные?")
                 .setMessage("Профилей: ${plan.source.profiles.size}; готовых наборов: ${plan.queue.jobs.size}; незавершённый: ${if(plan.queue.current!=null)"есть" else "нет"}.\nСуществующие профили сохранятся. Статусы отправки и состав очереди будут проверены. Подключение к ПК не переносится.")
                 .setNegativeButton("Отмена",null).setPositiveButton("Перенести"){_,_->attempt{
-                    check(!halted && work.profile==null && !networkBusy) { "Перенос заблокирован во время работы" }
+                    check(!halted && work.profile==null && !networkBusy && !editorOpen) { "Перенос заблокирован во время работы или редактирования" }
                     // Re-read both sources and destination: files may have changed while the dialog was open.
                     val currentProfiles=readStaged(File(dir,"profiles-transfer.json"))
                     val currentQueue=readStaged(File(dir,"queue-transfer.json"))
@@ -492,10 +563,27 @@ class MainActivity:AppCompatActivity() {
     }
 
     private fun saveProfile(p:OrganizationProfile){
-        val next=profiles.toMutableList();val at=next.indexOfFirst{it.title==p.title}
-        val index=if(at>=0){next[at]=p;at}else{next.add(p);next.lastIndex}
-        profileStore.repository.save(ProfileData(next,index))
-        profiles.clear();profiles.addAll(next);selected=index;profileSpinner()
+        val next=ProfileEditing.saved(profiles,editingIndex,p)
+        profileStore.repository.save(next)
+        profiles.clear();profiles.addAll(next.profiles);selected=next.selectedIndex;profileSpinner()
+    }
+    private fun openProfileEditor(profile:OrganizationProfile,index:Int?) {
+        check(work.profile==null && snapshot.current==null && !halted){"Профиль заблокирован на время работы"}
+        pauseFlow();editorScanTarget=null;editingIndex=index;editorOpen=true
+        applyProfile(profile);render();b.etProfileTitle.requestFocus();b.etProfileTitle.selectAll()
+        b.profilePage.post{b.profilePage.smoothScrollTo(0,b.profileEditor.top)}
+    }
+    private fun closeProfileEditor() {
+        editorOpen=false;editingIndex=null;editorScanTarget=null;stopSoftwareScanTrigger();hideKeyboard()
+        applyProfile(profiles[selected]);render()
+    }
+    private fun selectEditorTarget(field:GtinInput,label:String) {
+        if(!editorOpen || work.profile!=null)return
+        editorScanTarget=field;b.tvEditorScanTarget.text="Сканирование: $label. Сохранится только GTIN."
+    }
+    private fun startEditorScan(field:GtinInput,label:String) {
+        if(!editorOpen || work.profile!=null || halted || dialogDepth>0)return
+        selectEditorTarget(field,label);field.requestFocus();field.selectAll();hideKeyboard();startSoftwareScanTrigger()
     }
     private fun restoreWork(){
         if(halted)return

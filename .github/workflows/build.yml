@@ -1,8 +1,8 @@
-name: Build CHZ 1.3.1 safely
+name: Build CHZ 1.3.2 safely
 on:
   workflow_dispatch:
   push:
-    branches: [main, codex/safe-profile-migration-131]
+    branches: [main, codex/profile-editor-132]
     paths: ["app/**", "companion_pc/**", "tests/**", "tools/**", "*.gradle", "gradle/**", ".github/workflows/build.yml"]
   pull_request:
     paths: ["app/**", "companion_pc/**", "tests/**", "tools/**", "*.gradle", "gradle/**", ".github/workflows/build.yml"]
@@ -53,15 +53,15 @@ jobs:
         run: |
           ./gradlew --no-daemon assembleRelease assemblePilotUpdate
           mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk dist/CHZ-1.3.1-safe.apk
-          cp app/build/outputs/apk/pilotUpdate/app-pilotUpdate.apk dist/CHZ-1.3.1-pilot-update.apk
+          cp app/build/outputs/apk/release/app-release.apk dist/CHZ-1.3.2-safe.apk
+          cp app/build/outputs/apk/pilotUpdate/app-pilotUpdate.apk dist/CHZ-1.3.2-pilot-update.apk
           python tools/release_manifest.py dist "$GITHUB_SHA" "$ANDROID_HOME/build-tools/34.0.0"
           cp tools/*.ps1 tools/*.cmd tools/signing-certificate-sha256.txt dist/
           cp docs/INSTALL_1_3_1_RU.txt dist/
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'pull_request'
         with:
-          name: CHZ-Android-1.3.1-verified
+          name: CHZ-Android-1.3.2-verified
           path: dist/*
           if-no-files-found: error
       - name: Remove runner key
@@ -87,5 +87,5 @@ jobs:
           Copy-Item README_PC_RU.md dist/
       - uses: actions/upload-artifact@v4
         with:
-          name: CHZ-Windows-helper-1.3.1
+          name: CHZ-Windows-helper-1.3.2
           path: companion_pc/dist/*
