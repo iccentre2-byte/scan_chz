@@ -20,3 +20,9 @@ try {
     if(!$rejected){throw 'Corrupted backup accepted'}
 } finally {if(Test-Path -LiteralPath $temp){Remove-Item -LiteralPath $temp}}
 Write-Host 'Windows tools checks passed: native quoting, UTF8, envelope and corruption rejection.'
+$a='{"profiles":[{"title":"test","template":{"expected":{"04607010740016":1},"setGtin":"04609144660000"}}],"selectedIndex":0}'|ConvertFrom-Json
+$b='{"selectedIndex":0,"profiles":[{"template":{"setGtin":"04609144660000","expected":{"04607010740016":1}},"title":"test"}]}'|ConvertFrom-Json
+if((Get-ChzCanonicalJson $a) -cne (Get-ChzCanonicalJson $b)){throw 'Field ordering must not change semantic backup comparison'}
+$b.profiles[0].template.expected.'04607010740016'=2
+if((Get-ChzCanonicalJson $a) -ceq (Get-ChzCanonicalJson $b)){throw 'Changed composition must fail preservation check'}
+Write-Host 'Backup preservation comparison passed: field ordering ignored; changed composition rejected.'

@@ -4,10 +4,15 @@ $expectedSigner='fbad4349bc4ad7aff13ddb98458b9160086b6d4a19056155fad57eb776e7d65
 $oldPackage='com.tsd.czsetcollector.pilot'
 try {
     $adb=Get-ChzAdb; $serial=Get-ChzDevice $adb
+    $safe=Invoke-ChzNative $adb @('-s',$serial,'shell','pm','path','com.tsd.czsetcollector.safe')
+    if($safe.ExitCode -eq 0 -and $safe.Text -match '(?m)^package:') {
+        & (Join-Path $PSScriptRoot 'Update_Safe.ps1') -BackupDirectory $BackupDirectory
+        return
+    }
     if(!$BackupDirectory){$BackupDirectory=& (Join-Path $PSScriptRoot 'Backup_TSD.ps1')}
     $BackupDirectory=[IO.Path]::GetFullPath($BackupDirectory)
     $reportPath=Join-Path $BackupDirectory 'verified-backup.json'
-    if(!(Test-Path -LiteralPath $reportPath)){throw 'A verified USB backup is required before installation'}
+    if(!(Test-Path -LiteralPath $reportPath)){throw 'A verified TSD backup is required before installation'}
     $report=[IO.File]::ReadAllText($reportPath,$ChzUtf8) | ConvertFrom-Json
     if($report.format -ne 'cz-device-backup' -or $report.version -ne 1 -or $report.verified -ne $true -or $report.serial -ne $serial -or $report.package -ne $oldPackage){throw 'Backup does not match this TSD'}
     foreach($entry in $report.files.PSObject.Properties){
@@ -44,11 +49,11 @@ try {
     $sameSigner=($installedSigner -eq $expectedSigner)
     $targetPackage=if($sameSigner){$oldPackage}else{'com.tsd.czsetcollector.safe'}
     $record=@($manifest.apks | Where-Object applicationId -eq $targetPackage)
-    if($record.Count -ne 1 -or $record[0].signerSha256 -ne $expectedSigner -or $record[0].signatureVerified -ne $true -or $record[0].file -notin @('CHZ-1.3.1-safe.apk','CHZ-1.3.1-pilot-update.apk')){throw 'Release record missing or invalid'}
+    if($record.Count -ne 1 -or $record[0].signerSha256 -ne $expectedSigner -or $record[0].signatureVerified -ne $true -or $record[0].file -notin @('CHZ-1.3.2-safe.apk','CHZ-1.3.2-pilot-update.apk')){throw 'Release record missing or invalid'}
     $newApk=Join-Path $PSScriptRoot $record[0].file
     if((Get-FileHash -LiteralPath $newApk -Algorithm SHA256).Hash.ToLowerInvariant() -ne $record[0].sha256){throw 'New APK checksum mismatch'}
     $newIdentity=Get-ChzIdentity $newApk
-    if((Get-ChzSigner $newApk) -ne $expectedSigner -or $newIdentity.Package -ne $targetPackage -or $newIdentity.Code -ne 9 -or $newIdentity.Version -ne '1.3.1'){throw 'New APK verification failed'}
+    if((Get-ChzSigner $newApk) -ne $expectedSigner -or $newIdentity.Package -ne $targetPackage -or $newIdentity.Code -ne 10 -or $newIdentity.Version -ne '1.3.2'){throw 'New APK verification failed'}
     if($sameSigner -and $newIdentity.Code -lt $installedIdentity.Code){throw 'Downgrade refused'}
     $skipInstall=$false
     if(!$sameSigner) {

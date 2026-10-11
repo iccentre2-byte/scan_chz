@@ -13,8 +13,8 @@ def main():
     dest, commit, sdk = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
     expected = Path(__file__).with_name('signing-certificate-sha256.txt').read_text().strip()
     records = []
-    for name, app_id in [('CHZ-1.3.1-safe.apk', 'com.tsd.czsetcollector.safe'),
-                         ('CHZ-1.3.1-pilot-update.apk', 'com.tsd.czsetcollector.pilot')]:
+    for name, app_id in [('CHZ-1.3.2-safe.apk', 'com.tsd.czsetcollector.safe'),
+                         ('CHZ-1.3.2-pilot-update.apk', 'com.tsd.czsetcollector.pilot')]:
         apk = dest / name
         certs = re.findall(r'Signer #\d+ certificate SHA-256 digest: ([a-f0-9]{64})',
                            checked(sdk / 'apksigner', 'verify', '--verbose', '--print-certs', apk))
@@ -24,10 +24,10 @@ def main():
         package = re.search(r'^    A: package="([^"]+)"', tree, re.M)
         code = re.search(r'^    A: android:versionCode\([^)]*\)=\(type 0x10\)0x([a-fA-F0-9]+)', tree, re.M)
         version = re.search(r'^    A: android:versionName\([^)]*\)="([^"]+)"', tree, re.M)
-        if not package or not code or not version or (package[1], int(code[1], 16), version[1]) != (app_id, 9, '1.3.1'):
+        if not package or not code or not version or (package[1], int(code[1], 16), version[1]) != (app_id, 10, '1.3.2'):
             raise RuntimeError('Unexpected APK identity/version; refusing release')
         checked(sdk / 'zipalign', '-c', '4', apk)
-        records.append(dict(file=name, applicationId=app_id, versionCode=9, versionName='1.3.1',
+        records.append(dict(file=name, applicationId=app_id, versionCode=10, versionName='1.3.2',
                             sha256=hashlib.sha256(apk.read_bytes()).hexdigest(),
                             signerSha256=certs[0], signatureVerified=True))
     (dest / 'release-manifest.json').write_text(json.dumps(dict(format='cz-apk-release', version=1,
