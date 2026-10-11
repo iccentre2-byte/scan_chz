@@ -98,7 +98,7 @@ function Export-Chz131Data([string]$adb,[string]$serial,[string]$destination) {
         Start-Sleep -Milliseconds 250
     }
     function Open-131Main {
-        $null=Invoke-131Adb @('shell','am','start','-n',($package+'/com.tsd.czsetcollector.MainActivity'))
+        $null=Invoke-131Adb @('shell','am','start','--activity-clear-top','-n',($package+'/com.tsd.czsetcollector.MainActivity'))
         Start-Sleep -Milliseconds 350
         $ui=Read-131Ui;Assert-131Screen $ui
         $versions=@(Find-131Node $ui 'tvAppVersion')
