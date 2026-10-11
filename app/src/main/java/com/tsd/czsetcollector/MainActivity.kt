@@ -10,15 +10,16 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import android.text.method.ScrollingMovementMethod
 import android.util.Base64
+import android.util.AtomicFile
 import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
 import com.tsd.czsetcollector.databinding.ActivityMainBinding
 import kotlinx.coroutines.*
 import java.io.File
@@ -30,6 +31,7 @@ class MainActivity:AppCompatActivity() {
     private lateinit var b:ActivityMainBinding
     private lateinit var prefs:SharedPreferences
     private lateinit var store:QueueStore
+    private lateinit var profileStore:ProfileStore
     private val gson=Gson()
     private val scope=CoroutineScope(SupervisorJob()+Dispatchers.Main)
     private val mainHandler=Handler(Looper.getMainLooper())
@@ -48,6 +50,38 @@ class MainActivity:AppCompatActivity() {
     private var lastCodeAt=0L
     private var keyboardSuppressed=false
     private var activeToast:Toast?=null
+    private val importProfiles=registerForActivityResult(ActivityResultContracts.OpenDocument()){uri->
+        if(uri!=null)attempt{
+            check(work.profile==null && !halted){"Сначала выйдите к выбору профиля"}
+            val raw=readBackup(uri);val incoming=ProfileBackup.decode(raw)
+            require(incoming.profiles.isNotEmpty()){"В резервной копии нет профилей"}
+            val preview=ProfileBackup.merge(ProfileData(profiles.toList(),selected),incoming)
+            guardDialog().setTitle("Импорт профилей")
+                .setMessage("В файле: ${incoming.profiles.size}. Добавить: ${preview.added}, уже есть: ${preview.unchanged}, переименовать: ${preview.renamed}.\nСуществующие шаблоны сохранятся. Очередь и подключение к ПК не меняются.")
+                .setNegativeButton("Отмена",null).setPositiveButton("Импортировать"){_,_->attempt{
+                    check(work.profile==null && !halted){"Сначала выйдите к выбору профиля"}
+                    val merged=profileStore.repository.importBackup(raw)
+                    profiles.clear();profiles.addAll(merged.data.profiles);selected=merged.data.selectedIndex
+                    profileSpinner();render();log("Импорт профилей проверен: добавлено ${merged.added}; очередь сохранена")
+                    toast("Профили импортированы и проверены. Проверьте ИНН и состав перед работой.")
+                }}.show()
+        }
+    }
+    private val importQueue=registerForActivityResult(ActivityResultContracts.OpenDocument()){uri->
+        if(uri!=null)attempt{
+            check(work.profile==null && !halted){"Сначала выйдите к выбору профиля"}
+            val raw=readBackup(uri);val incoming=QueueBackup.prepareImport(readStoredQueue(),raw)
+            guardDialog().setTitle("Перенести очередь 1.3.0?")
+                .setMessage("Готовых наборов: ${incoming.jobs.size}; незавершённый: ${if(incoming.current!=null)"есть" else "нет"}.\nИдентификаторы, статусы и отметки отправки сохранятся. Перенос возможен только в пустую очередь. Старую программу не удаляйте; продолжайте работу в одной выбранной версии.")
+                .setNegativeButton("Отмена",null).setPositiveButton("Перенести"){_,_->attempt{
+                    check(work.profile==null && !halted){"Сначала выйдите к выбору профиля"}
+                    try {snapshot=store.importEmpty(raw)}catch(e:Exception){storageFailure(e);return@attempt}
+                    restoreWork();render()
+                    log("Перенос очереди проверен. Статусы, идентификаторы и отметки отправки сохранены.")
+                    toast("Очередь перенесена и проверена. Поток на паузе.")
+                }}.show()
+        }
+    }
     private val restartScan:Runnable=Runnable {
         if(canFlow()) {
             startSoftwareScanTrigger()
@@ -79,9 +113,9 @@ class MainActivity:AppCompatActivity() {
     }
     override fun onCreate(savedInstanceState:Bundle?) {
         super.onCreate(savedInstanceState);b=ActivityMainBinding.inflate(layoutInflater);setContentView(b.root)
-        prefs=getSharedPreferences("cz_multi_profiles",Context.MODE_PRIVATE);store=QueueStore(filesDir)
+        prefs=getSharedPreferences("cz_multi_profiles",Context.MODE_PRIVATE);store=QueueStore(filesDir);profileStore=ProfileStore(prefs,filesDir)
         b.tvLog.movementMethod=ScrollingMovementMethod()
-        b.tvAppVersion.text="1.3.1-rc1 · Профиль → Сборка · Поток"
+        b.tvAppVersion.text="1.3.1 · Профиль → Сборка · Поток"
         try {snapshot=store.load()} catch(e:Exception){storageFailure(e)}
         try {pc=gson.fromJson(prefs.getString("pc_connection",null),PcConfig::class.java)?:PcConfig()}catch(e:Exception){pc=PcConfig()}
         b.spinnerEnvironment.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,
@@ -97,7 +131,12 @@ class MainActivity:AppCompatActivity() {
                 }
             }
         })
-        log("Запуск 1.3.1-rc1. Профиль зафиксирован при входе в сборку. Подпись только на ПК.")
+        log("Запуск 1.3.1. Профиль зафиксирован при входе в сборку. Подпись только на ПК.")
+        handleStagedMigration(intent)
+    }
+    override fun onNewIntent(intent:Intent?) {
+        super.onNewIntent(intent)
+        if(intent!=null){setIntent(intent);handleStagedMigration(intent)}
     }
     override fun onResume(){
         super.onResume();foreground=true
@@ -120,7 +159,7 @@ class MainActivity:AppCompatActivity() {
     private fun listeners(){
         b.spinnerProfiles.onItemSelectedListener=object:AdapterView.OnItemSelectedListener{
             override fun onItemSelected(parent:AdapterView<*>?,view:View?,position:Int,id:Long){
-                if(work.profile!=null || position !in profiles.indices)return
+                if(work.profile!=null || halted || position !in profiles.indices)return
                 selected=position;prefs.edit().putInt("selected_profile_index",position).apply();applyProfile(profiles[position]);render()
             }
             override fun onNothingSelected(parent:AdapterView<*>?){}
@@ -151,10 +190,23 @@ class MainActivity:AppCompatActivity() {
             if(profiles.size<=1){toast("Единственный профиль не удаляется");return@setOnClickListener}
             guardDialog().setTitle("Удалить профиль?").setMessage("Собранные наборы останутся в очереди со своим ИНН и составом.")
                 .setNegativeButton("Отмена",null).setPositiveButton("Удалить"){_,_->
-                    profiles.removeAt(selected);selected=0
-                    prefs.edit().putString("profiles_json",gson.toJson(profiles)).putInt("selected_profile_index",0).commit();profileSpinner()
+                    attempt{
+                        val next=profiles.toMutableList().apply{removeAt(selected)}
+                        profileStore.repository.save(ProfileData(next,0))
+                        profiles.clear();profiles.addAll(next);selected=0;profileSpinner()
+                    }
                 }.show()
         }
+        b.btnExportProfiles.setOnClickListener{attempt{
+            pauseFlow()
+            val encoded=ProfileBackup.encode(ProfileData(profiles.toList(),selected))
+            val f=File(getExternalFilesDir(null),"chz-profiles-backup.json")
+            f.writeText(encoded,Charsets.UTF_8)
+            require(ProfileBackup.decode(f.readText(Charsets.UTF_8))==ProfileData(profiles.toList(),selected)){"Не удалось проверить файл экспорта"}
+            share(f,"application/json");log("Экспорт всех профилей проверен. Ключ ПК и КЭП исключены.")
+        }}
+        b.btnImportProfiles.setOnClickListener{pauseFlow();importProfiles.launch(arrayOf("*/*"))}
+        b.btnImportQueue.setOnClickListener{pauseFlow();importQueue.launch(arrayOf("*/*"))}
         b.btnConnectPc.setOnClickListener{connectDialog()}
         b.btnSendDraft.setOnClickListener{pauseFlow();sync(true,true)}
         b.btnRefresh.setOnClickListener{pauseFlow();sync(false,true)}
@@ -169,7 +221,10 @@ class MainActivity:AppCompatActivity() {
             guardDialog().setTitle("Экспорт резервной копии")
                 .setMessage("Файл содержит коды маркировки и ИНН, но не ключ подключения к ПК. Передавайте только себе.")
                 .setNegativeButton("Отмена",null).setPositiveButton("Экспортировать"){_,_->attempt{
-                    val f=File(getExternalFilesDir(null),"chz-queue-backup.json");f.writeText(gson.toJson(snapshot));share(f,"application/json")
+                    val encoded=QueueBackup.encode(readStoredQueue())
+                    val f=File(getExternalFilesDir(null),"chz-queue-backup.json");f.writeText(encoded,Charsets.UTF_8)
+                    require(QueueBackup.decode(f.readText(Charsets.UTF_8))==snapshot){"Не удалось проверить файл очереди"}
+                    share(f,"application/json")
                 }}.show()
         }
         b.btnCheckUpdate.setOnClickListener{
@@ -195,12 +250,11 @@ class MainActivity:AppCompatActivity() {
     }
     private fun loadProfiles(){
         try {
-            val type=object:TypeToken<List<OrganizationProfile>>(){}.type
-            val saved:List<OrganizationProfile>?=gson.fromJson(prefs.getString("profiles_json",null),type)
-            if(saved!=null)profiles.addAll(saved)
-        }catch(e:Exception){log("Старые профили не прочитаны. Исходные настройки не перезаписаны.")}
+            val saved=profileStore.repository.load()
+            profiles.addAll(saved.profiles);selected=saved.selectedIndex
+        }catch(e:Exception){log("Профили не прочитаны; исходные данные защищены от перезаписи.");storageFailure(e)}
         if(profiles.isEmpty())profiles.add(OrganizationProfile(title="Основной профиль"))
-        selected=prefs.getInt("selected_profile_index",0).coerceIn(0,profiles.lastIndex);profileSpinner()
+        selected=selected.coerceIn(0,profiles.lastIndex);profileSpinner()
     }
     private fun profileSpinner(){
         b.spinnerProfiles.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,profiles)
@@ -316,6 +370,8 @@ class MainActivity:AppCompatActivity() {
     }
     private fun savePc(c:PcConfig){pc=c;prefs.edit().putString("pc_connection",gson.toJson(c)).commit();render();log("Подключение к ПК сохранено: ${c.url}")}
     private fun persist():Boolean=try{store.save(snapshot);true}catch(e:Exception){storageFailure(e);false}
+    private fun readStoredQueue():Snapshot=try{store.load()}catch(e:Exception){storageFailure(e);throw e}
+    private fun readStoredProfiles():ProfileData=try{profileStore.repository.load()}catch(e:Exception){storageFailure(e);throw e}
     private fun storageFailure(e:Exception){
         halted=true;pauseFlow()
         guardDialog().setTitle("Сканирование остановлено: ошибка хранения")
@@ -331,6 +387,9 @@ class MainActivity:AppCompatActivity() {
         b.btnStartWork.text=if(editorOpen)"Сохранить и начать работу" else "Начать работу"
         b.btnStartWork.isEnabled=p==null&&!halted
         b.btnEditProfile.isEnabled=!locked
+        b.btnExportProfiles.isEnabled=!halted
+        b.btnImportProfiles.isEnabled=p==null&&!halted
+        b.btnImportQueue.isEnabled=p==null&&!halted&&snapshot.current==null&&snapshot.jobs.isEmpty()
         val chosen=profiles.getOrNull(selected)
         b.tvProfileSummary.text=chosen?.let{"${it.title}\nИНН: ${it.inn.ifBlank{"не заполнен"}}\n${if(it.environment=="sandbox")"ТЕСТОВЫЙ контур" else "РЕАЛЬНЫЙ ЧЗ"}\nGTIN набора: ${it.template.setGtin.ifBlank{"не заполнен"}} · ${it.template.expected.values.sum()} шт"}?:"Выберите профиль"
         b.tvWorkProfile.text=p?.let{"${it.title}\nИНН ${it.inn} · ${if(it.environment=="sandbox")"ТЕСТОВЫЙ контур" else "РЕАЛЬНЫЙ ЧЗ"}\nПрофиль зафиксирован до выхода из сборки"}?:""
@@ -353,7 +412,7 @@ class MainActivity:AppCompatActivity() {
             "…${it.setCode.takeLast(6)} · ИНН ${it.inn} · ${it.children.size} шт\n${Labels.status(it.status)}${if(it.detail.isNotBlank())"\n"+it.detail.take(350)else ""}${it.documentId?.let{d->"\nДокумент: $d"}?:""}"
         }.ifBlank{"Готовых наборов пока нет"}
     }
-    private fun attempt(block:()->Unit){try{block()}catch(e:Exception){toast(e.message?:"Ошибка");log(e.message?:"Ошибка")}}
+    private fun attempt(block:()->Unit){try{block()}catch(e:Exception){if(e is ProfileStorageException)storageFailure(e);toast(e.message?:"Ошибка");log(e.message?:"Ошибка")}}
     private fun toast(message:String){activeToast?.cancel();activeToast=Toast.makeText(this,message,Toast.LENGTH_LONG);activeToast?.show()}
     private fun log(message:String){
         val entry="[${SimpleDateFormat("HH:mm:ss",Locale.ROOT).format(Date())}] $message\n"
@@ -365,11 +424,77 @@ class MainActivity:AppCompatActivity() {
         val uri=FileProvider.getUriForFile(this,"$packageName.provider",file)
         startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply{type=mime;putExtra(Intent.EXTRA_STREAM,uri);addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)},"Передать файл себе"))
     }}
+    private fun readBackup(uri:android.net.Uri):String {
+        val bytes=contentResolver.openInputStream(uri)?.use{stream->
+            val out=java.io.ByteArrayOutputStream();val buffer=ByteArray(8192)
+            while(true){val n=stream.read(buffer);if(n<0)break;require(out.size()+n<=BackupJson.MAX_BYTES){"Резервная копия слишком велика"};out.write(buffer,0,n)}
+            out.toByteArray()
+        }?:throw IllegalArgumentException("Не удалось открыть резервную копию")
+        val decoder=Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+        return decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString()
+    }
+
+    private fun readStaged(file:File):String {
+        require(file.isFile && file.length()<=BackupJson.MAX_BYTES) { "Файл переноса отсутствует или слишком велик: ${file.name}" }
+        val bytes=file.inputStream().use{stream->
+            val out=java.io.ByteArrayOutputStream();val buffer=ByteArray(8192)
+            while(true){val n=stream.read(buffer);if(n<0)break;require(out.size()+n<=BackupJson.MAX_BYTES){"Файл переноса слишком велик"};out.write(buffer,0,n)}
+            out.toByteArray()
+        }
+        return Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(bytes)).toString()
+    }
+    private fun handleStagedMigration(request:Intent?) {
+        if(request?.getBooleanExtra("chz_import_staged",false)!=true)return
+        request.removeExtra("chz_import_staged") // Rotation must not open a second confirmation.
+        attempt{
+            check(!halted && work.profile==null && !networkBusy && dialogDepth==0) { "Перенос заблокирован во время рабочей сессии или диалога. Сначала выйдите к профилям" }
+            pauseFlow()
+            val external=checkNotNull(getExternalFilesDir(null)){"Недоступна папка переноса"}
+            val dir=File(external,"migration")
+            val profilesFile=readStaged(File(dir,"profiles-transfer.json"))
+            val queueFile=readStaged(File(dir,"queue-transfer.json"))
+            val source=StagedMigration.read(profilesFile,queueFile)
+            val plan=StagedMigration.prepare(ProfileData(profiles.toList(),selected),readStoredQueue(),source)
+            guardDialog().setTitle("Перенести сохранённые данные?")
+                .setMessage("Профилей: ${plan.source.profiles.size}; готовых наборов: ${plan.queue.jobs.size}; незавершённый: ${if(plan.queue.current!=null)"есть" else "нет"}.\nСуществующие профили сохранятся. Статусы отправки и состав очереди будут проверены. Подключение к ПК не переносится.")
+                .setNegativeButton("Отмена",null).setPositiveButton("Перенести"){_,_->attempt{
+                    check(!halted && work.profile==null && !networkBusy) { "Перенос заблокирован во время работы" }
+                    // Re-read both sources and destination: files may have changed while the dialog was open.
+                    val currentProfiles=readStaged(File(dir,"profiles-transfer.json"))
+                    val currentQueue=readStaged(File(dir,"queue-transfer.json"))
+                    val checkedSources=StagedMigration.read(currentProfiles,currentQueue)
+                    val latest=StagedMigration.prepare(readStoredProfiles(),readStoredQueue(),checkedSources)
+                    require(latest.profilesHash==plan.profilesHash && latest.queueHash==plan.queueHash) { "Исходные копии изменились; запустите перенос заново" }
+                    val merged=profileStore.repository.importBackup(currentProfiles)
+                    val savedBefore=readStoredQueue()
+                    if(savedBefore!=latest.queue){
+                        try{snapshot=store.importEmpty(currentQueue)}catch(e:Exception){storageFailure(e);return@attempt}
+                    }else snapshot=savedBefore
+                    val savedProfiles=readStoredProfiles()
+                    val savedQueue=readStoredQueue()
+                    val verified=try{StagedMigration.verifiedResult(latest.copy(merge=merged),savedProfiles,savedQueue)}
+                        catch(e:Exception){storageFailure(e);return@attempt}
+                    val result=AtomicFile(File(dir,"migration-result.json"))
+                    try {
+                        val stream=result.startWrite()
+                        try{stream.write(verified.toByteArray(Charsets.UTF_8));result.finishWrite(stream)}
+                        catch(e:Exception){result.failWrite(stream);throw e}
+                        require(String(result.readFully(),Charsets.UTF_8)==verified){"Подтверждение переноса не сохранено"}
+                    } catch(e:Exception){storageFailure(e);return@attempt}
+                    profiles.clear();profiles.addAll(savedProfiles.profiles);selected=savedProfiles.selectedIndex
+                    snapshot=savedQueue;profileSpinner();restoreWork();render()
+                    log("Автоматический перенос проверен. Профилей: ${latest.source.profiles.size}; готовых наборов: ${latest.queue.jobs.size}. Статусы отправки сохранены.")
+                    toast("Перенос подтверждён. Старую программу не удаляйте. Работайте в одной выбранной версии.")
+                }}.show()
+        }
+    }
 
     private fun saveProfile(p:OrganizationProfile){
         val next=profiles.toMutableList();val at=next.indexOfFirst{it.title==p.title}
         val index=if(at>=0){next[at]=p;at}else{next.add(p);next.lastIndex}
-        check(prefs.edit().putString("profiles_json",gson.toJson(next)).putInt("selected_profile_index",index).commit()) {"Не удалось сохранить профиль"}
+        profileStore.repository.save(ProfileData(next,index))
         profiles.clear();profiles.addAll(next);selected=index;profileSpinner()
     }
     private fun restoreWork(){

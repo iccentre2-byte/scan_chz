@@ -11,23 +11,42 @@ android {
         applicationId "com.tsd.czsetcollector"
         minSdk 24
         targetSdk 34
-        versionCode 8
-        versionName "1.3.1-rc1"
+        versionCode 9
+        versionName "1.3.1"
         resValue "string", "app_name", "ЧЗ: Наборы"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        stable {
+            def keyPath = System.getenv('CHZ_SIGNING_KEYSTORE')
+            if (keyPath) storeFile file(keyPath)
+            storePassword System.getenv('CHZ_SIGNING_PASSWORD')
+            keyAlias System.getenv('CHZ_SIGNING_ALIAS')
+            keyPassword System.getenv('CHZ_SIGNING_PASSWORD')
+        }
+    }
+
     buildTypes {
         release {
+            applicationIdSuffix '.safe'
+            resValue 'string', 'app_name', 'ЧЗ: Наборы 1.3.1'
+            signingConfig signingConfigs.stable
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
         debug {
-            applicationIdSuffix '.pilot'
-            versionNameSuffix '-pilot'
-            resValue 'string', 'app_name', 'ЧЗ: Наборы — пилот'
+            applicationIdSuffix '.dev'
+            versionNameSuffix '-dev'
+            resValue 'string', 'app_name', 'ЧЗ: Наборы — разработка'
             minifyEnabled false
+        }
+        pilotUpdate {
+            initWith release
+            applicationIdSuffix '.pilot'
+            resValue 'string', 'app_name', 'ЧЗ: Наборы — пилот'
+            matchingFallbacks = ['release']
         }
     }
 
