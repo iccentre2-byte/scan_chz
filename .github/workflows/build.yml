@@ -1,49 +1,60 @@
 name: Build CHZ pilot (no publishing)
-
 on:
+  workflow_dispatch:
   push:
-    branches: [ "main" ]
-
+    branches: ["main"]
+    paths: ["app/**", "companion_pc/**", "tests/**", "*.gradle", "gradle/**", ".github/workflows/build.yml"]
 permissions:
-  contents: write
-
+  contents: read
 jobs:
-  build:
+  tests:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
-        cache: gradle
-
-    - name: Restore Gradle Wrapper JAR if missing
-      run: |
-        mkdir -p gradle/wrapper
-        if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-          curl -sL https://raw.githubusercontent.com/gradle/gradle/master/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
-        fi
-
-    - name: Create Fixed Keystore
-      run: |
-        mkdir -p ~/.android
-        keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
-
-    - name: Build Standalone APK
-      run: ./gradlew assembleDebug --stacktrace
-
-    - name: Auto-update app-release.apk in repo root
-      run: |
-        cp app/build/outputs/apk/debug/app-debug.apk app-release.apk
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        git add app-release.apk gradle/wrapper/gradle-wrapper.jar
-        git commit -m "Auto-update app-release.apk [skip ci]" || echo "No changes to commit"
-        git push
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r companion_pc/requirements.txt
+      - run: python -m unittest discover -s tests -v
+  android-pilot:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK
+        run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0'
+      - name: Build and test pilot (different applicationId; does not replace v1.2.4)
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon testDebugUnitTest assembleDebug
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/CHZ-1.3.0-rc1-pilot.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CHZ-Android-1.3.0-rc1-pilot
+          path: dist/*.apk
+  windows-helper:
+    needs: tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Tests and EXE
+        working-directory: companion_pc
+        run: |
+          python -m pip install -r requirements.txt pyinstaller==6.22.3
+          python -m PyInstaller --clean --noconfirm --onefile --name CHZ_PC_Helper --hidden-import qrcode.image.svg --collect-all cryptography --add-data "web:web" --add-data "signer.ps1:." server.py
+          Copy-Item Start_PC.cmd dist/
+          Copy-Item Firewall_PRIVATE.cmd dist/
+          Copy-Item README_PC_RU.md dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CHZ-Windows-helper-1.3.0-rc1
+          path: companion_pc/dist/*
