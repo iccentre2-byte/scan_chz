@@ -39,9 +39,9 @@ function Get-ChzDevice([string]$Adb) {
     $result=Invoke-ChzNative $Adb @('devices','-l')
     if($result.ExitCode -ne 0){throw 'ADB unavailable'}
     $lines=@($result.Text -split '\r?\n' | Where-Object {$_ -match '^([^\s]+)\s+device(?:\s|$)'})
-    if($lines.Count -ne 1){throw 'Exactly one USB device is required. Connect the TSD, unlock it, enable USB debugging and accept its permission prompt.'}
+    if($lines.Count -ne 1){throw 'Exactly one connected TSD is required. Connect by USB or pair through Android Wi-Fi debugging.'}
     $serial=($lines[0] -split '\s+')[0]
-    if($serial -notmatch '^[A-Za-z0-9._:-]+$' -or $serial -match '^emulator-|:') {throw 'A physical USB device is required'}
+    if($serial -notmatch '^[A-Za-z0-9._:-]+$' -or $serial -match '^emulator-' -or ($serial.Contains(':') -and $serial -notmatch '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}$')) {throw 'A physical TSD is required'}
     return $serial
 }
 function Get-ChzSigner([string]$Apk) {

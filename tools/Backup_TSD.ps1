@@ -79,7 +79,7 @@ try {
     $files=@('profiles-transfer.json','profiles-original.json','queue-transfer.json','queue-original.json','installed-1.3.0.apk')
     $hashes=[ordered]@{}
     foreach($file in $files){$hashes[$file]=(Get-FileHash -LiteralPath (Join-Path $Destination $file) -Algorithm SHA256).Hash.ToLowerInvariant()}
-    $report=[ordered]@{format='cz-usb-backup';version=1;verified=$true;serial=$serial;package=$package;installedVersion=$identity.Version;installedVersionCode=$identity.Code;signerSha256=$signer;createdUtc=[DateTime]::UtcNow.ToString('o');profilesCount=$safeProfiles.Count;selectedIndex=$selected;queueJobs=@($parsedQueue.jobs).Count;hasCurrent=($null -ne $parsedQueue.current);profileSource=$prefs.Path;queueSource=if($queue){$queue.Path}else{'absent'};files=$hashes;secretsExported=$false}
+    $report=[ordered]@{format='cz-device-backup';version=1;verified=$true;serial=$serial;transport=if($serial.Contains(':')){'wifi'}else{'usb'};package=$package;installedVersion=$identity.Version;installedVersionCode=$identity.Code;signerSha256=$signer;createdUtc=[DateTime]::UtcNow.ToString('o');profilesCount=$safeProfiles.Count;selectedIndex=$selected;queueJobs=@($parsedQueue.jobs).Count;hasCurrent=($null -ne $parsedQueue.current);profileSource=$prefs.Path;queueSource=if($queue){$queue.Path}else{'absent'};files=$hashes;secretsExported=$false}
     Write-ChzUtf8 (Join-Path $Destination 'verified-backup.json') ($report | ConvertTo-Json -Depth 12)
     Write-ChzUtf8 (Join-Path $Destination 'REPORT.txt') ("BACKUP VERIFIED`r`nProfiles: $($safeProfiles.Count)`r`nQueue jobs: $(@($parsedQueue.jobs).Count)`r`nNo application data changed. No connection keys or signing credentials exported.`r`n")
     Write-Host "BACKUP VERIFIED: $Destination"

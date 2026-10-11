@@ -10,3 +10,5 @@ local.properties
 backups/
 signing/
 private/
+__pycache__/
+*.pyc

@@ -9,7 +9,7 @@ try {
     $reportPath=Join-Path $BackupDirectory 'verified-backup.json'
     if(!(Test-Path -LiteralPath $reportPath)){throw 'A verified USB backup is required before installation'}
     $report=[IO.File]::ReadAllText($reportPath,$ChzUtf8) | ConvertFrom-Json
-    if($report.format -ne 'cz-usb-backup' -or $report.version -ne 1 -or $report.verified -ne $true -or $report.serial -ne $serial -or $report.package -ne $oldPackage){throw 'Backup does not match this TSD'}
+    if($report.format -ne 'cz-device-backup' -or $report.version -ne 1 -or $report.verified -ne $true -or $report.serial -ne $serial -or $report.package -ne $oldPackage){throw 'Backup does not match this TSD'}
     foreach($entry in $report.files.PSObject.Properties){
         if($entry.Name -notin @('profiles-transfer.json','profiles-original.json','queue-transfer.json','queue-original.json','installed-1.3.0.apk')){throw 'Unknown backup file'}
         if((Get-FileHash -LiteralPath (Join-Path $BackupDirectory $entry.Name) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.Value){throw 'Backup file checksum differs; no installation'}

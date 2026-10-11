@@ -22,7 +22,6 @@ jobs:
     needs: tests
     runs-on: ubuntu-24.04
     env:
-      CHZ_SIGNING_KEYSTORE: ${{ runner.temp }}/chz-signing.p12
       CHZ_SIGNING_PASSWORD: ${{ secrets.CHZ_SIGNING_PASSWORD }}
       CHZ_SIGNING_ALIAS: ${{ secrets.CHZ_SIGNING_ALIAS }}
     steps:
@@ -47,7 +46,8 @@ jobs:
         run: |
           test -n "$SIGNING_KEY" && test -n "$CHZ_SIGNING_PASSWORD" && test -n "$CHZ_SIGNING_ALIAS"
           umask 077
-          printf '%s' "$SIGNING_KEY" | base64 --decode > "$CHZ_SIGNING_KEYSTORE"
+          printf '%s' "$SIGNING_KEY" | base64 --decode > "$RUNNER_TEMP/chz-signing.p12"
+          printf 'CHZ_SIGNING_KEYSTORE=%s/chz-signing.p12\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Build stable signed APKs
         if: github.event_name != 'pull_request'
         run: |
@@ -66,7 +66,7 @@ jobs:
           if-no-files-found: error
       - name: Remove runner key
         if: always()
-        run: rm -f "$CHZ_SIGNING_KEYSTORE"
+        run: rm -f "$RUNNER_TEMP/chz-signing.p12"
   windows-helper:
     needs: tests
     runs-on: windows-latest
@@ -75,6 +75,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Check Windows backup tools
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows_tools.ps1
       - name: Build helper
         working-directory: companion_pc
         run: |
