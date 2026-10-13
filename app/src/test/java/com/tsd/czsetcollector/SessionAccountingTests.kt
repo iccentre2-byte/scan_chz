@@ -128,8 +128,9 @@ class SessionAccountingTests {
     @Test fun resettingCurrentRemovesOnlyItsMappingAndKeepsHistoryAndActiveSession() {
         val opened=CollectionScan.accept(SessionAccounting.begin(legacy(),profile,now),profile,code(gtin,20)){true}!!.snapshot;val currentId=opened.current!!.id
         val reset=SessionAccounting.discardCurrent(opened)
-        assertNull(reset.current);assertFalse(reset.sessions!!.jobSessions.containsKey(currentId))
-        assertEquals(opened.jobs,reset.jobs);assertEquals(opened.sessions!!.activeSessionId,reset.sessions.activeSessionId)
+        val resetLedger=checkNotNull(reset.sessions)
+        assertNull(reset.current);assertFalse(resetLedger.jobSessions.containsKey(currentId))
+        assertEquals(opened.jobs,reset.jobs);assertEquals(opened.sessions!!.activeSessionId,resetLedger.activeSessionId)
         assertEquals(reset,QueueBackup.decode(QueueBackup.encode(reset)))
         val corrupt=JsonParser.parseString(BackupJson.unwrap(QueueBackup.encode(opened),QueueBackup.FORMAT)).asJsonObject
         corrupt["sessions"].asJsonObject["jobSessions"].asJsonObject.addProperty(currentId,SessionAccounting.LEGACY)
