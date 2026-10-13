@@ -16,6 +16,7 @@
                 <Button android:id="@+id/btnEditProfile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Настроить профиль" android:minHeight="48dp" />
                 <Button android:id="@+id/btnNewProfile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Создать новый профиль" android:minHeight="48dp" />
                 <Button android:id="@+id/btnDuplicateProfile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Создать копию выбранного профиля" android:minHeight="48dp" />
+                <Button android:id="@+id/btnDeleteProfile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Удалить выбранный профиль" android:minHeight="48dp" />
                 <Button android:id="@+id/btnBackupAll" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Резервная копия профилей и очереди" android:minHeight="48dp" />
                 <Button android:id="@+id/btnExportProfiles" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Экспорт всех профилей и шаблонов" android:minHeight="48dp" />
                 <Button android:id="@+id/btnImportProfiles" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Импорт профилей из резервной копии" android:minHeight="48dp" />
@@ -35,7 +36,6 @@
                     <com.tsd.czsetcollector.ProfileCompositionEditor android:id="@+id/compositionEditor" android:layout_width="match_parent" android:layout_height="wrap_content" />
                     <Button android:id="@+id/btnAddCompositionRow" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Добавить GTIN в состав" android:minHeight="48dp" />
                     <Button android:id="@+id/btnSaveProfile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Сохранить профиль и состав" android:minHeight="48dp" />
-                    <Button android:id="@+id/btnDeleteProfile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Удалить выбранный профиль" android:minHeight="48dp" />
                 </LinearLayout>
             </LinearLayout>
         </ScrollView>

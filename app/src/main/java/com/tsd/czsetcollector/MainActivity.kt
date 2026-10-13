@@ -215,7 +215,7 @@ class MainActivity:AppCompatActivity() {
                 check(prefs.edit().putString("work_session_profile",gson.toJson(work.profile)).commit()) {"Не удалось сохранить выбранный профиль"}
             } catch(e:Exception) {work.leave(null);throw e}
             editorOpen=false;editingIndex=null;editorScanTarget=null;clearScanInput();hideKeyboard();render()
-            scanResult=if(snapshot.current==null)"Готово к сканированию набора."else "Набор открыт. Продолжайте сканировать пачки."
+            scanResult=if(snapshot.current==null)"Готово к сканированию набора." else "Набор открыт. Продолжайте сканировать пачки."
             scanResultError=false;render()
             b.workPage.scrollTo(0,0);b.etScanInput.requestFocus()
             log("Начата работа: ${p.title}. Профиль нельзя переключить внутри сборки.")
@@ -223,12 +223,16 @@ class MainActivity:AppCompatActivity() {
         b.btnBackProfiles.setOnClickListener {requestProfilePage()}
         b.btnFlow.setOnClickListener {if(work.streaming)pauseFlow() else attempt{startFlow()}}
         b.btnDeleteProfile.setOnClickListener {
-            if(work.profile!=null || snapshot.current!=null || editingIndex==null)return@setOnClickListener
+            if(work.profile!=null || snapshot.current!=null || halted || editorOpen)return@setOnClickListener
             if(profiles.size<=1){toast("Единственный профиль не удаляется");return@setOnClickListener}
-            guardDialog().setTitle("Удалить профиль?").setMessage("Собранные наборы останутся в очереди со своим ИНН и составом.")
+            val at=selected
+            val target=profiles.getOrNull(at) ?: return@setOnClickListener
+            guardDialog().setTitle("Удалить профиль «${target.title}»?")
+                .setMessage("Будет удалён только профиль «${target.title}» и его шаблон.\nОчередь не удаляется: собранные наборы останутся со своим ИНН и составом.")
                 .setNegativeButton("Отмена",null).setPositiveButton("Удалить"){_,_->
                     attempt{
-                        val at=checkNotNull(editingIndex)
+                        check(work.profile==null && snapshot.current==null && !halted && !editorOpen){"Профиль заблокирован на время работы"}
+                        check(selected==at && profiles.getOrNull(at)==target){"Выбранный профиль изменился. Повторите удаление."}
                         val next=profiles.toMutableList().apply{removeAt(at)}
                         profileStore.repository.save(ProfileData(next,0))
                         profiles.clear();profiles.addAll(next);selected=0;profileSpinner();closeProfileEditor()
@@ -427,7 +431,7 @@ class MainActivity:AppCompatActivity() {
         b.profilePage.visibility=if(p==null)View.VISIBLE else View.GONE
         b.workPage.visibility=if(p!=null)View.VISIBLE else View.GONE
         b.tvScanResult.visibility=if(p!=null)View.VISIBLE else View.GONE
-        b.tvScanResult.text=if(halted)"Сканирование остановлено: ошибка сохранения." else scanResult.ifBlank{if(j==null)"Готово к сканированию набора."else "Набор открыт. Продолжайте сканировать пачки."}
+        b.tvScanResult.text=if(halted)"Сканирование остановлено: ошибка сохранения." else scanResult.ifBlank{if(j==null)"Готово к сканированию набора." else "Набор открыт. Продолжайте сканировать пачки."}
         b.tvScanResult.setTextColor(android.graphics.Color.BLACK)
         b.tvScanResult.setBackgroundColor(if(scanResultError||halted)0xffffe0b2.toInt()else 0xffe8f5e9.toInt())
         b.profileEditor.visibility=if(editorOpen)View.VISIBLE else View.GONE
@@ -453,7 +457,7 @@ class MainActivity:AppCompatActivity() {
 
         listOf<View>(b.etProfileTitle,b.etInn,b.spinnerEnvironment,b.etSetGtin,b.compositionEditor,b.btnScanSetGtin,b.btnAddCompositionRow,b.btnSaveProfile).forEach{it.isEnabled=!locked}
         b.spinnerProfiles.isEnabled=!locked&&!editorOpen
-        b.btnDeleteProfile.isEnabled=!locked&&editingIndex!=null
+        b.btnDeleteProfile.isEnabled=!locked&&!editorOpen&&selected in profiles.indices
         b.tvConnection.text=if(pc.url.isBlank())"ПК не подключён" else "ПК: ${pc.url}"
         b.tvScanState.text=if(halted)"ОСТАНОВЛЕНО: ошибка сохранения" else if(pairMode)"Сканируйте QR подключения ПК" else if(j==null)"Сканируйте DataMatrix НАБОРА" else "Сканируйте пачки: ${j.children.size} / ${j.template.expected.values.sum()}"
         b.tvCurrentSet.text=j?.let{"Набор: ${it.setCode}\nИНН ${it.inn} · ${it.environment}"}?:"Текущий набор не открыт"
