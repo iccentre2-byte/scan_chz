@@ -25,11 +25,11 @@ try {
     $records=@($manifest.apks|Where-Object applicationId -eq $package)
     if($records.Count -ne 1){throw 'Expected one safe APK'}
     $record=$records[0]
-    if($record.file -ne 'CHZ-1.3.2-safe.apk' -or $record.versionCode -ne 10 -or $record.versionName -ne '1.3.2' -or $record.signerSha256 -ne $expectedSigner -or $record.signatureVerified -ne $true){throw 'Unexpected release record'}
+    if($record.file -ne 'CHZ-1.3.3-safe.apk' -or $record.versionCode -ne 11 -or $record.versionName -ne '1.3.3' -or $record.signerSha256 -ne $expectedSigner -or $record.signatureVerified -ne $true){throw 'Unexpected release record'}
     $apk=Join-Path $PSScriptRoot $record.file
     if((Get-FileHash -LiteralPath $apk -Algorithm SHA256).Hash.ToLowerInvariant() -ne $record.sha256 -or (Get-ChzSigner $apk) -ne $expectedSigner){throw 'New APK checksum/signature mismatch'}
     $identity=Get-ChzIdentity $apk
-    if($identity.Package -ne $package -or $identity.Version -ne '1.3.2' -or $identity.Code -ne 10 -or $identity.Code -le $r.installedVersionCode){throw 'Unexpected version or non-upgrade'}
+    if($identity.Package -ne $package -or $identity.Version -ne '1.3.3' -or $identity.Code -ne 11 -or $identity.Code -le $r.installedVersionCode){throw 'Unexpected version or non-upgrade'}
     $scratch=Join-Path $PSScriptRoot ('.work\'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $scratch -Force|Out-Null
     $pm=Invoke-ChzNative $adb @('-s',$serial,'shell','pm','path',$package)
     $paths=@($pm.Text -split '\r?\n'|Where-Object {$_ -match '^package:.*\.apk$'})
@@ -39,16 +39,18 @@ try {
     if($pull.ExitCode -ne 0 -or (Get-FileHash -LiteralPath $current -Algorithm SHA256).Hash.ToLowerInvariant() -ne $r.files.$apkFile -or (Get-ChzSigner $current) -ne $expectedSigner){throw 'Installed APK changed since backup'}
     $install=Invoke-ChzNative $adb @('-s',$serial,'install','-r',$apk) 120000
     if($install.ExitCode -ne 0 -or $install.Text -notmatch '(?m)^Success\s*$'){throw 'Android refused update. No uninstall or destructive retry performed.'}
-    $launch=Invoke-ChzNative $adb @('-s',$serial,'shell','am','start','-n',($package+'/com.tsd.czsetcollector.MainActivity'))
+    $launch=Invoke-ChzNative $adb @('-s',$serial,'shell','am','start','-n',($package+'/com.tsd.czsetcollector.MainActivity'),'--ez','chz_maintenance','true')
     if($launch.ExitCode -ne 0){throw 'Update installed; launch failed. Keep the backup.'}
-    $outcome=[ordered]@{installed=$true;package=$package;version='1.3.2';versionCode=10;signatureVerified=$true;backupVerified=$true;dataPreservationVerified=$false}
+    $outcome=[ordered]@{installed=$true;package=$package;version='1.3.3';versionCode=11;signatureVerified=$true;backupVerified=$true;dataPreservationVerified=$false}
     Write-ChzUtf8 (Join-Path $BackupDirectory 'update-result.json') ($outcome|ConvertTo-Json)
     Write-Host 'Signed update installed. Confirm the new backup on the TSD to verify preservation.'
-    $after=& (Join-Path $PSScriptRoot 'Backup_App.ps1')
+    $after=& (Join-Path $PSScriptRoot 'Backup_App.ps1') -Maintenance
     $afterP=Assert-ChzEnvelope (Join-Path $after 'chz-profiles-backup.json') 'cz-profiles-backup'
     $afterQ=Assert-ChzEnvelope (Join-Path $after 'chz-queue-backup.json') 'cz-queue-backup'
     if((Get-ChzCanonicalJson ($pp|ConvertFrom-Json)) -cne (Get-ChzCanonicalJson ($afterP|ConvertFrom-Json)) -or (Get-ChzCanonicalJson ($qp|ConvertFrom-Json)) -cne (Get-ChzCanonicalJson ($afterQ|ConvertFrom-Json))){throw 'Data differs after update. Keep both backups; do not scan or submit until checked.'}
     $outcome.dataPreservationVerified=$true;$outcome.afterBackupDirectory=$after
     Write-ChzUtf8 (Join-Path $BackupDirectory 'update-result.json') ($outcome|ConvertTo-Json)
+    $resume=Invoke-ChzNative $adb @('-s',$serial,'shell','am','start','-n',($package+'/com.tsd.czsetcollector.MainActivity'),'--ez','chz_maintenance','false')
+    if($resume.ExitCode -ne 0){Write-Host 'Data verified. Tap Continue on the TSD to resume work.'}
     Write-Host 'UPDATE VERIFIED. Every profile, template and queue record was preserved.'
 } catch {Write-Host ('STOP: '+$_.Exception.Message) -ForegroundColor Red;exit 1}

@@ -21,10 +21,10 @@ class ReleaseManifestTests(unittest.TestCase):
             if 'xmltree' in args:
                 app = 'com.tsd.czsetcollector.safe' if 'safe.apk' in str(args[-2]) else 'com.tsd.czsetcollector.pilot'
                 if wrong_package: app = 'wrong.package'
-                version = '1.3.0' if wrong_version else '1.3.2'
-                return f'    A: package="{app}"\n    A: android:versionCode(0x0101021b)=(type 0x10)0xa\n    A: android:versionName(0x0101021c)="{version}"\n'
+                version = '1.3.0' if wrong_version else '1.3.3'
+                return f'    A: package="{app}"\n    A: android:versionCode(0x0101021b)=(type 0x10)0xb\n    A: android:versionName(0x0101021c)="{version}"\n'
             return ''
-        for name in ('CHZ-1.3.2-safe.apk', 'CHZ-1.3.2-pilot-update.apk'):
+        for name in ('CHZ-1.3.3-safe.apk', 'CHZ-1.3.3-pilot-update.apk'):
             (folder / name).write_bytes(b'test-fixture')
         with patch.object(sys, 'argv', ['release_manifest.py', str(folder), 'abc123', 'sdk']), patch.object(release_manifest, 'checked', side_effect=tool):
             release_manifest.main()

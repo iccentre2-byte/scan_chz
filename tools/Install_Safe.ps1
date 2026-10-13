@@ -49,11 +49,11 @@ try {
     $sameSigner=($installedSigner -eq $expectedSigner)
     $targetPackage=if($sameSigner){$oldPackage}else{'com.tsd.czsetcollector.safe'}
     $record=@($manifest.apks | Where-Object applicationId -eq $targetPackage)
-    if($record.Count -ne 1 -or $record[0].signerSha256 -ne $expectedSigner -or $record[0].signatureVerified -ne $true -or $record[0].file -notin @('CHZ-1.3.2-safe.apk','CHZ-1.3.2-pilot-update.apk')){throw 'Release record missing or invalid'}
+    if($record.Count -ne 1 -or $record[0].signerSha256 -ne $expectedSigner -or $record[0].signatureVerified -ne $true -or $record[0].file -notin @('CHZ-1.3.3-safe.apk','CHZ-1.3.3-pilot-update.apk')){throw 'Release record missing or invalid'}
     $newApk=Join-Path $PSScriptRoot $record[0].file
     if((Get-FileHash -LiteralPath $newApk -Algorithm SHA256).Hash.ToLowerInvariant() -ne $record[0].sha256){throw 'New APK checksum mismatch'}
     $newIdentity=Get-ChzIdentity $newApk
-    if((Get-ChzSigner $newApk) -ne $expectedSigner -or $newIdentity.Package -ne $targetPackage -or $newIdentity.Code -ne 10 -or $newIdentity.Version -ne '1.3.2'){throw 'New APK verification failed'}
+    if((Get-ChzSigner $newApk) -ne $expectedSigner -or $newIdentity.Package -ne $targetPackage -or $newIdentity.Code -ne 11 -or $newIdentity.Version -ne '1.3.3'){throw 'New APK verification failed'}
     if($sameSigner -and $newIdentity.Code -lt $installedIdentity.Code){throw 'Downgrade refused'}
     $skipInstall=$false
     if(!$sameSigner) {

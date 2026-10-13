@@ -10,7 +10,7 @@ import threading
 import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'companion_pc'))
-from server import Server,Handler,State,is_lan_v4
+from server import Server,Handler,State,is_lan_v4,backup_existing_queue
 from transport import setup
 from test_core import job
 
@@ -20,7 +20,7 @@ class HttpTests(unittest.TestCase):
         self.state=State(d,self.config,'192.168.1.10')
         self.admin=Server(('127.0.0.1',0),Handler);self.admin.state=self.state;self.admin.lane='admin'
         self.lan=Server(('127.0.0.1',0),Handler);self.lan.state=self.state;self.lan.lane='lan'
-        self.lan.socket=self.config['sslContext'].wrap_socket(self.lan.socket,server_side=True)
+        self.lan.tls_context=self.config['sslContext']
         self.config['adminPort']=self.admin.server_port;self.config['lanPort']=self.lan.server_port
         for s in (self.admin,self.lan):threading.Thread(target=s.serve_forever,daemon=True).start()
     def tearDown(self):
@@ -61,6 +61,29 @@ class HttpTests(unittest.TestCase):
         self.assertTrue(pair['pairing'].startswith('CZPAIR1:'));self.assertEqual(len(pair['certificateSha256']),64)
         c2=setup(Path(self.tmp.name));self.assertEqual(c2['deviceKey'],self.config['deviceKey']);self.assertEqual(c2['certificateSha256'],self.config['certificateSha256'])
         code,svg=self.request(False,'/api/pair.svg');self.assertEqual(code,200);self.assertIn(b'<svg',svg)
+    def test_idle_tls_peer_cannot_block_other_tsd_connections(self):
+        idle=socket.create_connection(self.lan.server_address,timeout=3)
+        try:self.assertEqual(self.request(True,'/v1/ping')[0],200)
+        finally:idle.close()
+    def test_multiple_lan_reads_have_complete_lengths_and_explicit_close(self):
+        for _ in range(3):
+            ctx=ssl.create_default_context(cafile=str(Path(self.tmp.name)/'tls.crt'))
+            c=http.client.HTTPSConnection('127.0.0.1',self.lan.server_port,context=ctx,timeout=3)
+            c.request('GET','/v1/ping',headers={'Authorization':'Bearer '+self.config['deviceKey']})
+            r=c.getresponse();raw=r.read()
+            self.assertEqual(r.status,200);self.assertEqual(r.getheader('Connection'),'close')
+            self.assertEqual(int(r.getheader('Content-Length')),len(raw));self.assertIn('version',json.loads(raw));c.close()
+    def test_missing_job_has_explicit_not_found_response(self):
+        import uuid
+        self.assertEqual(self.request(True,'/v1/jobs/'+str(uuid.uuid4()))[0],404)
+    def test_startup_backup_does_not_mutate_submitting_jobs(self):
+        import sqlite3
+        j=self.state.store.enqueue(job());self.state.store.change(j['id'],'SUBMITTING')
+        backup=backup_existing_queue(Path(self.tmp.name))
+        from contextlib import closing
+        with closing(sqlite3.connect(backup)) as c:
+            self.assertEqual(c.execute('SELECT state FROM jobs').fetchone()[0],'SUBMITTING')
+        self.assertEqual(self.state.store.get(j['id'])['status'],'SUBMITTING')
     def test_upload_idempotency_over_tls(self):
         j=job();self.request(True,'/v1/jobs',j);self.request(True,'/v1/jobs',j)
         self.assertEqual(len(self.state.store.all()),1)
