@@ -48,6 +48,7 @@ class HttpTests(unittest.TestCase):
     def test_lan_has_no_signing_endpoint(self):
         self.assertEqual(self.request(True,'/api/submit',{'confirmed':True})[0],404)
         self.assertEqual(self.request(True,'/api/certificates',{})[0],404)
+        self.assertEqual(self.request(True,'/api/login-check',{'confirmed':True})[0],404)
     def test_admin_requires_secret(self):
         self.assertEqual(self.request(False,'/api/state',auth=False)[0],401)
     def test_admin_rejects_cross_origin(self):
@@ -56,6 +57,16 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.request(False,'/api/state',extra={'Host':'evil.example'})[0],403)
     def test_admin_requires_explicit_confirmation(self):
         self.assertEqual(self.request(False,'/api/submit',{'confirmed':False})[0],400)
+        with patch('server.WindowsSigner') as signer,patch('server.TrueApi') as api:
+            self.assertEqual(self.request(False,'/api/login-check',{'confirmed':False})[0],400)
+            signer.assert_not_called();api.assert_not_called()
+    def test_cached_state_explains_missing_session_without_authenticating(self):
+        self.state.store.enqueue(job())
+        with patch('server.WindowsSigner') as signer,patch('server.TrueApi') as api:
+            code,raw=self.request(False,'/api/state');self.assertEqual(code,200)
+            sync=json.loads(raw)['syncGroups'][0]
+            self.assertEqual(sync['pending'],1);self.assertEqual(sync['session'],'missing')
+            self.assertTrue(sync['requiresLogin']);signer.assert_not_called();api.assert_not_called()
     def test_qr_and_pairing_persist(self):
         status,raw=self.request(False,'/api/connection');self.assertEqual(status,200);pair=json.loads(raw)
         self.assertTrue(pair['pairing'].startswith('CZPAIR1:'));self.assertEqual(len(pair['certificateSha256']),64)

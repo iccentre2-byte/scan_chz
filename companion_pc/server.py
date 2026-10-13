@@ -28,6 +28,8 @@ from transport import setup
 
 ROOT=Path(__file__).resolve().parent
 ACTIVE={'SUBMITTED','PROCESSING','CHECK_REQUIRED','UNKNOWN'}
+PENDING=ACTIVE|{'WAITING_SIGNATURE','BLOCKED'}
+SESSION_TTL=8*3600
 
 def backup_existing_queue(data_dir):
     """Read-only copy before startup recovery. Never copy TLS or pairing secrets."""
@@ -57,6 +59,7 @@ class State:
         self.data_dir=data_dir; self.store=Store(data_dir/'queue.sqlite3'); self.engine=Engine(self.store)
         self.sessions={}; self.operations={}; self.op_lock=threading.RLock(); self.worker=concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.api_lock=threading.RLock(); self.stop=threading.Event(); self.advertise=advertise
+        self.sync_lock=threading.RLock(); self.sync_records={}
     def addresses(self):
         result=[]
         if self.advertise: result=[self.advertise]
@@ -80,7 +83,16 @@ class State:
             result['pairing']='CZPAIR1:'+base64.urlsafe_b64encode(dumps(pair).encode()).decode().rstrip('=')
         return result
     def schedule(self, action, payload):
+        if action not in {'submit','refresh','login-check'}: raise ValidationError('Неизвестная операция')
         if payload.get('confirmed') is not True: raise ValidationError('Нужно явное подтверждение на ПК')
+        if action=='login-check':
+            group=payload.get('group')
+            if not isinstance(group,dict) or set(group)!={'inn','environment','pg'}:
+                raise ValidationError('Выберите один ИНН, контур и товарную группу')
+            snapshot=[j for j in self.store.all() if j['status'] in PENDING and
+                      (j['inn'],j['environment'],j['pg'])==(group['inn'],group['environment'],group['pg'])]
+            if not snapshot: raise ValidationError('В выбранной организации нет неподтверждённых наборов')
+            return self.enqueue_operation(action,snapshot,payload)
         items=payload.get('items')
         if not isinstance(items,list) or not 1<=len(items)<=MAX_SELECTION: raise ValidationError(f'Выберите от 1 до {MAX_SELECTION} наборов')
         snapshot=[]; seen=set()
@@ -94,46 +106,109 @@ class State:
             seen.add(j['id']); snapshot.append(j)
         if len({(j['inn'],j['environment'],j['pg']) for j in snapshot})!=1:
             raise ValidationError('За один раз выбирайте наборы одного ИНН, контура и товарной группы')
+        return self.enqueue_operation(action,snapshot,payload)
+    def enqueue_operation(self,action,snapshot,payload):
         signer=WindowsSigner(payload.get('thumbprint',''))
         ident=str(uuid.uuid4())
         with self.op_lock:
             if any(x['state'] in ('QUEUED','RUNNING') for x in self.operations.values()):
                 raise ValidationError('Дождитесь завершения предыдущей операции')
-            self.operations[ident]={'state':'QUEUED','action':action,'total':len(snapshot),'done':0,'error':''}
-        self.worker.submit(self._run,ident,action,snapshot,signer)
+            self.operations[ident]={'state':'QUEUED','action':action,'total':len(snapshot),'done':0,'error':'',
+                                    'stage':'login','startedAt':time.time()}
+        try:self.worker.submit(self._run,ident,action,snapshot,signer)
+        except Exception:
+            with self.op_lock:self.operations[ident].update(state='ERROR',error='Не удалось запустить операцию. Откройте помощник заново.')
+            raise
         return {'operationId':ident}
+    @staticmethod
+    def group_key(job):return job['environment'],job['inn'],job['pg']
+    def safe_error(self,error,api=None):
+        detail=str(error)
+        for secret in (self.admin_key,self.settings.get('deviceKey'),getattr(api,'token',None)):
+            if isinstance(secret,str) and secret:detail=detail.replace(secret,'[скрыто]')
+        return detail[:3000]
+    def record_sync(self,group,**values):
+        with self.sync_lock:self.sync_records.setdefault(group,{'lastAttempt':None,'lastSuccess':None,'error':''}).update(values)
+    def session_for(self,group):
+        with self.sync_lock:
+            matches=[v for k,v in self.sessions.items() if k[:2]==group[:2]]
+        if not matches:return None,'missing'
+        session=max(matches,key=lambda item:item[1])
+        return (None,'expired') if time.time()-session[1]>SESSION_TTL else (session[0],'active')
+    def sync_failure(self,group,error,api=None):
+        expired=isinstance(error,ApiError) and error.http_status in (401,403)
+        with self.sync_lock:
+            if expired:
+                for key,value in list(self.sessions.items()):
+                    if key[:2]==group[:2] and (api is None or value[0] is api):self.sessions.pop(key,None)
+            self.sync_records.setdefault(group,{'lastAttempt':None,'lastSuccess':None}).update(
+                error=self.safe_error(error,api),sessionExpired=expired)
     def _run(self, ident, action, jobs, signer):
-        op=self.operations[ident]; op['state']='RUNNING'
+        with self.op_lock:
+            op=self.operations[ident]; op['state']='RUNNING'
+        group=self.group_key(jobs[0]);api=None
+        self.record_sync(group,lastAttempt=time.time(),error='')
         try:
             with self.api_lock:
                 first=jobs[0]; key=(first['environment'],first['inn'],signer.thumbprint)
                 # Authentication signature is deliberately initiated only by a local user's action.
                 api=TrueApi(first['environment']); api.authenticate(signer,first['inn'])
-                self.sessions[key]=(api,time.time())
+                with self.sync_lock:self.sessions[key]=(api,time.time())
+                self.record_sync(group,error='',sessionExpired=False)
                 ids=[j['id'] for j in jobs]
-                if action=='submit': result=self.engine.submit_many(ids,api,signer)
-                else: result=self.engine.refresh_many(ids,api)
-                op['done']=len(result)
-            op['state']='DONE'
+                with self.op_lock:op['stage']='submit' if action=='submit' else 'check'
+                if action=='submit':
+                    result=self.engine.submit_many(ids,api,signer)
+                    with self.op_lock:op['done']=len(result)
+                else:
+                    for start in range(0,len(ids),MAX_SELECTION):
+                        self.record_sync(group,lastAttempt=time.time())
+                        result=self.engine.refresh_many(ids[start:start+MAX_SELECTION],api)
+                        with self.op_lock:op['done']+=len(result)
+                self.record_sync(group,lastSuccess=time.time(),error='',sessionExpired=False)
+            with self.op_lock:op['state']='DONE';op['finishedAt']=time.time()
         except Exception as e:
-            op['state']='ERROR'; op['error']=str(e)[:3000]
+            self.sync_failure(group,e,api)
+            with self.op_lock:op.update(state='ERROR',error=self.safe_error(e,api),finishedAt=time.time())
     def poll(self):
         while not self.stop.wait(20):
-            if not self.api_lock.acquire(blocking=False): continue
-            try:
-                groups=collections.defaultdict(list)
-                for j in self.store.all():
-                    if j['status'] not in ACTIVE: continue
-                    matches=[v for k,v in self.sessions.items() if k[:2]==(j['environment'],j['inn'])]
-                    if not matches: continue
-                    api,created=max(matches,key=lambda x:x[1])
-                    if time.time()-created>8*3600: continue
-                    groups[(j['environment'],j['inn'],j['pg'],api)].append(j['id'])
-                for (_,_,_,api),ids in groups.items():
+            self.poll_once()
+    def poll_once(self):
+        if not self.api_lock.acquire(blocking=False):return
+        try:
+            groups=collections.defaultdict(list)
+            for j in self.store.all():
+                if j['status'] in PENDING:groups[self.group_key(j)].append(j['id'])
+            for group,ids in groups.items():
+                api,_=self.session_for(group)
+                if api is None:continue # A timer never invokes authentication or a new УКЭП signature.
+                try:
                     for start in range(0,len(ids),MAX_SELECTION):
-                        try: self.engine.refresh_many(ids[start:start+MAX_SELECTION],api)
-                        except (ApiError,ValidationError): pass # Read only; never re-authenticate or re-submit in a timer.
-            finally: self.api_lock.release()
+                        self.record_sync(group,lastAttempt=time.time())
+                        self.engine.refresh_many(ids[start:start+MAX_SELECTION],api)
+                    self.record_sync(group,lastSuccess=time.time(),error='',sessionExpired=False)
+                except Exception as error:self.sync_failure(group,error,api)
+        finally:self.api_lock.release()
+    def public_sync(self,jobs=None):
+        groups=collections.defaultdict(collections.Counter)
+        for j in self.store.all() if jobs is None else jobs:
+            group=self.group_key(j)
+            groups[group]['total']+=1;groups[group]['pending']+=int(j['status'] in PENDING)
+            groups[group]['verified']+=int(j['status']=='VERIFIED')
+            groups[group]['failed']+=int(j['status']=='REJECTED')
+            groups[group]['cancelled']+=int(j['status']=='CANCELLED_LOCAL')
+            groups[group]['submitting']+=int(j['status']=='SUBMITTING')
+        result=[]
+        for group,counts in sorted(groups.items()):
+            pending=counts['pending']
+            _,session=self.session_for(group)
+            with self.sync_lock:record=dict(self.sync_records.get(group,{}))
+            if record.get('sessionExpired') and session=='missing':session='expired'
+            result.append(dict(environment=group[0],inn=group[1],pg=group[2],**counts,
+                allVerified=counts['total']>0 and counts['total']==counts['verified'],
+                session=session,requiresLogin=pending>0 and session!='active',
+                lastAttempt=record.get('lastAttempt'),lastSuccess=record.get('lastSuccess'),error=record.get('error','')))
+        return result
     def public_jobs(self):
         return [dict(j,statusRu=STATUS_RU.get(j['status'],j['status'])) for j in self.store.all()]
     def public_operations(self):
@@ -231,7 +306,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.response(200,job); return
             self.response(404,{'error':'ТСД может только передать набор и получить его статус'}); return
         if path=='/api/state' and method=='GET':
-            self.response(200,{'version':VERSION,'jobs':self.state.public_jobs(),
+            jobs=self.state.public_jobs()
+            self.response(200,{'version':VERSION,'jobs':jobs,'syncGroups':self.state.public_sync(jobs),
                        'operations':self.state.public_operations(),'selectionLimit':MAX_SELECTION,'dataDir':str(self.state.data_dir)}); return
         if path=='/api/connection' and method=='GET': self.response(200,self.state.connection()); return
         if path=='/api/pair.svg' and method=='GET':
@@ -246,7 +322,7 @@ class Handler(BaseHTTPRequestHandler):
             self.response(200,stream.getvalue(),'image/svg+xml'); return
         if path=='/api/certificates' and method=='POST':
             self.read_json(); self.response(200,{'certificates':certificates()}); return
-        if path in ('/api/submit','/api/refresh') and method=='POST':
+        if path in ('/api/submit','/api/refresh','/api/login-check') and method=='POST':
             self.response(202,self.state.schedule(path.split('/')[-1],self.read_json())); return
         if path=='/api/cancel' and method=='POST':
             body=self.read_json()

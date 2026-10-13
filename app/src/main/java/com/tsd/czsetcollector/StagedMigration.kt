@@ -20,7 +20,7 @@ object StagedMigration {
             BackupJson.sha256(BackupJson.unwrap(queueFile,QueueBackup.FORMAT)))
     }
     fun prepare(existingProfiles:ProfileData,existingQueue:Snapshot,source:StagedSources):StagedPlan {
-        require((existingQueue.current==null && existingQueue.jobs.isEmpty()) || existingQueue==source.queue) {
+        require(SessionAccounting.emptyForImport(existingQueue) || existingQueue==source.queue) {
             "Очередь отличается от исходной. Автоматический перенос остановлен без замены очереди"
         }
         val merge=ProfileBackup.merge(existingProfiles,source.profiles)

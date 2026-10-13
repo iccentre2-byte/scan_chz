@@ -87,12 +87,12 @@ data class Job(val schemaVersion:Int=1,val id:String=UUID.randomUUID().toString(
     val inn:String="",val pg:String="grocery",val template:Template=Template(),val setCode:String="",
     val children:MutableList<String> = mutableListOf(),var status:String="COLLECTING",var detail:String="",
     var documentId:String?=null,var uploaded:Boolean=false)
-data class Snapshot(var current:Job?=null,val jobs:MutableList<Job> = mutableListOf())
+data class Snapshot(var current:Job?=null,val jobs:MutableList<Job> = mutableListOf(),val sessions:SessionLedger?=null)
 data class PcConfig(val url:String="",val key:String="",val pin:String="")
 object Labels {
     fun status(s:String):String=mapOf("COLLECTING" to "Комплектуется", "LOCAL_READY" to "Собран на ТСД — ещё не на ПК",
         "WAITING_SIGNATURE" to "На ПК: ожидает подписи", "SUBMITTING" to "ПК отправляет в ЧЗ",
-        "SUBMITTED" to "Передан в ЧЗ", "PROCESSING" to "ЧЗ обрабатывает", "VERIFIED" to "Сформирован: состав проверен",
+        "SUBMITTED" to "Передан в ЧЗ — результат ещё не проверен", "PROCESSING" to "Последняя проверка: ЧЗ обрабатывает", "VERIFIED" to "Сформирован: состав проверен",
         "REJECTED" to "Отклонён ЧЗ", "UNKNOWN" to "Результат неизвестен — НЕ повторять",
         "BLOCKED" to "ПК: требуется исправление", "CANCELLED_LOCAL" to "Отменён на ПК до отправки", "CHECK_REQUIRED" to "Требуется проверка ЧЗ")[s]?:s
 }

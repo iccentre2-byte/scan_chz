@@ -10,6 +10,7 @@ data class ProfileMerge(val data: ProfileData, val added: Int, val unchanged: In
 object ProfileBackup {
     const val FORMAT = "cz-profiles-backup"
     private val gson = Gson()
+    internal fun decodeProfile(value: JsonElement?): OrganizationProfile = profile(requireNotNull(value))
 
     fun encode(data: ProfileData): String {
         val payload = gson.toJson(data)
