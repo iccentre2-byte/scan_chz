@@ -18,7 +18,7 @@ object QueueBackup {
 
     fun parsePayload(raw: String): Snapshot {
         val root = BackupJson.objectValue(BackupJson.parse(raw))
-        BackupJson.keys(root, setOf("jobs"), setOf("current"))
+        BackupJson.keys(root, setOf("jobs"), setOf("current", "sessions"))
         val jobs = root["jobs"]
         require(jobs != null && jobs.isJsonArray && jobs.asJsonArray.size() <= 10000) { "Неполный/слишком большой список заданий" }
         val current = root["current"]
@@ -41,6 +41,7 @@ object QueueBackup {
             require(children != null && children.isJsonArray && children.asJsonArray.size() <= 1000) { "Неверный состав задания" }
             require(children.asJsonArray.all { it.isJsonPrimitive && it.asJsonPrimitive.isString }) { "Повреждены коды пачек" }
         }
+        val sessionJson = root.remove("sessions")
         val snapshot = gson.fromJson(root, Snapshot::class.java)
         val parsed = snapshot.jobs.toList() + listOfNotNull(snapshot.current)
         require(parsed.map { it.id }.toSet().size == parsed.size) { "Повтор идентификатора задания в файле" }
@@ -54,12 +55,12 @@ object QueueBackup {
             require(actual.all { (gtin, n) -> n <= (expected[gtin] ?: 0) }) { "Превышен состав набора" }
             require(j === snapshot.current || actual == expected) { "В очереди есть недоукомплектованный набор" }
         }
-        return snapshot
+        return snapshot.copy(sessions=SessionAccounting.decode(sessionJson,snapshot))
     }
 
     /** Refuse replacement/merge: importing over a live queue risks a duplicate submission. */
     fun prepareImport(existing: Snapshot, raw: String): Snapshot {
-        require(existing.current == null && existing.jobs.isEmpty()) { "Очередь уже содержит наборы. Перенос разрешён только в пустую очередь" }
+        require(SessionAccounting.emptyForImport(existing)) { "Очередь или история уже содержит данные. Перенос разрешён только в пустое хранилище" }
         return decode(raw)
     }
 }

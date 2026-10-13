@@ -53,6 +53,9 @@ class MainActivity:AppCompatActivity() {
     private var scanFeedback:ScanFeedback?=null
     private var scanResult=""
     private var scanResultError=false
+    private var queueView=QueueView.CURRENT
+    private var historySession:String?=null
+    private var historyOptions=emptyList<SessionOption>()
     private var keyboardSuppressed=false
     private var activeToast:Toast?=null
     private val importProfiles=registerForActivityResult(ActivityResultContracts.OpenDocument()){uri->
@@ -127,6 +130,7 @@ class MainActivity:AppCompatActivity() {
         try {pc=gson.fromJson(prefs.getString("pc_connection",null),PcConfig::class.java)?:PcConfig()}catch(e:Exception){pc=PcConfig()}
         b.spinnerEnvironment.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,
             listOf("PRODUCTION — реальный ЧЗ","SANDBOX — тестовый контур"))
+        b.spinnerQueueView.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,QueueView.values().map{it.label})
         loadProfiles();listeners();restoreWork();render()
         onBackPressedDispatcher.addCallback(this,object:OnBackPressedCallback(true){
             override fun handleOnBackPressed(){
@@ -173,6 +177,26 @@ class MainActivity:AppCompatActivity() {
     private fun listeners(){
         b.btnResumeAfterUpdate.setOnClickListener{maintenance=false;render()}
         b.btnFeedbackSettings.setOnClickListener{feedbackSettings()}
+        b.btnViewQueue.setOnClickListener{showQueueViewer()}
+        b.btnBeginSession.setOnClickListener{attempt{
+            check(!maintenance && !halted){"Сначала завершите проверку обновления"}
+            val p=checkNotNull(work.profile){"Сначала выберите рабочий профиль"}
+            if(beginTrackedSession(p)){clearScanInput();render();log("Новая сессия начата. Старые наборы остались в истории.")}
+        }}
+        b.spinnerQueueView.onItemSelectedListener=object:AdapterView.OnItemSelectedListener{
+            override fun onItemSelected(parent:AdapterView<*>?,view:View?,position:Int,id:Long){
+                val next=QueueView.values().getOrNull(position) ?: return
+                if(next!=queueView){queueView=next;render()}
+            }
+            override fun onNothingSelected(parent:AdapterView<*>?){}
+        }
+        b.spinnerSessionHistory.onItemSelectedListener=object:AdapterView.OnItemSelectedListener{
+            override fun onItemSelected(parent:AdapterView<*>?,view:View?,position:Int,id:Long){
+                val next=historyOptions.getOrNull(position)?.id ?: return
+                if(next!=historySession){historySession=next;render()}
+            }
+            override fun onNothingSelected(parent:AdapterView<*>?){}
+        }
         b.spinnerProfiles.onItemSelectedListener=object:AdapterView.OnItemSelectedListener{
             override fun onItemSelected(parent:AdapterView<*>?,view:View?,position:Int,id:Long){
                 if(work.profile!=null || halted || editorOpen || position !in profiles.indices)return
@@ -208,11 +232,13 @@ class MainActivity:AppCompatActivity() {
         b.btnAddCompositionRow.setOnClickListener{attempt{b.compositionEditor.addRow().requestFocus()}}
         b.btnBackupAll.setOnClickListener{showBackupDialog()}
         b.btnStartWork.setOnClickListener {attempt{
+            check(!maintenance && !halted){"Сначала завершите проверку обновления"}
+            check(snapshot.current==null){"Сначала завершите незавершённый набор"}
             val p=if(editorOpen)inputProfile() else profiles[selected]
             work.enter(p,snapshot.current)
             try {
                 if(editorOpen)saveProfile(p)
-                check(prefs.edit().putString("work_session_profile",gson.toJson(work.profile)).commit()) {"Не удалось сохранить выбранный профиль"}
+                if(!beginTrackedSession(checkNotNull(work.profile))){work.leave(null);return@attempt}
             } catch(e:Exception) {work.leave(null);throw e}
             editorOpen=false;editingIndex=null;editorScanTarget=null;clearScanInput();hideKeyboard();render()
             scanResult=if(snapshot.current==null)"Готово к сканированию набора." else "Набор открыт. Продолжайте сканировать пачки."
@@ -256,7 +282,10 @@ class MainActivity:AppCompatActivity() {
             val j=snapshot.current?:return@setOnClickListener
             guardDialog().setTitle("Сбросить незавершённый набор?")
                 .setMessage("Пачек: ${j.children.size}. Этот набор ещё не передавался на ПК. Готовые наборы не будут удалены.")
-                .setNegativeButton("Отмена",null).setPositiveButton("Сбросить"){_,_->snapshot.current=null;persist();pauseFlow();clearScanInput();showScanResult("Незавершённый набор сброшен. Готово к следующему набору.")}.show()
+                .setNegativeButton("Отмена",null).setPositiveButton("Сбросить"){_,_->
+                    val next=SessionAccounting.discardCurrent(snapshot)
+                    if(persist(next)){snapshot=next;pauseFlow();clearScanInput();showScanResult("Незавершённый набор сброшен. Готово к следующему набору.")}
+                }.show()
         }
         b.btnShareLog.setOnClickListener{share(logFile,"text/plain")}
         b.btnBackup.setOnClickListener{
@@ -347,6 +376,7 @@ class MainActivity:AppCompatActivity() {
             val result=CollectionScan.accept(snapshot,profile,code){next->persist(next)}
             if(result==null){showScanResult("Код не принят: ошибка сохранения.",true);return}
             snapshot=result.snapshot
+            if(!SessionAccounting.ready(snapshot))pauseFlow()
             showScanResult(result.message,result.signal==ScanSignal.DUPLICATE)
             result.signal?.let{signal->
                 scanFeedback?.play(signal)
@@ -356,6 +386,17 @@ class MainActivity:AppCompatActivity() {
             showScanResult("Код не принят: ${e.message?:"Ошибка"}",true)
             toast(e.message?:"Ошибка");log(e.message?:"Ошибка")
         } finally {scheduleScan(220)}
+    }
+    private fun beginTrackedSession(profile:OrganizationProfile):Boolean {
+        val next=SessionAccounting.begin(snapshot,profile,System.currentTimeMillis())
+        if(!persist(next))return false
+        snapshot=next
+        // The ledger contains the frozen profile and is the authoritative restart record.
+        if(!prefs.edit().putString("work_session_profile",gson.toJson(profile)).commit())log("Профиль сессии сохранён с очередью; отдельный кэш профиля не записан.")
+        queueView=QueueView.CURRENT;b.spinnerQueueView.setSelection(queueView.ordinal)
+        historySession=SessionAccounting.active(snapshot)?.id
+        scanResult="Новая сессия начата. Сканируйте код набора.";scanResultError=false
+        return true
     }
     private fun showScanResult(message:String,error:Boolean=false){scanResult=message;scanResultError=error;render()}
     private fun feedbackSettings(){
@@ -369,6 +410,41 @@ class MainActivity:AppCompatActivity() {
                 check(prefs.edit().putBoolean("scan_sound",sound.isChecked).putBoolean("scan_voice",voice.isChecked).commit()){"Не удалось сохранить настройки сигналов"}
                 scanFeedback?.configure(sound.isChecked,voice.isChecked)
             }}.show()
+    }
+    private fun renderQueueViews(){
+        val options=QueueViews.options(snapshot)
+        if(options!=historyOptions){
+            historyOptions=options
+            historySession=historySession?.takeIf{id->options.any{it.id==id}} ?: SessionAccounting.active(snapshot)?.id ?: options.firstOrNull()?.id
+            b.spinnerSessionHistory.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,options)
+            b.spinnerSessionHistory.setSelection(options.indexOfFirst{it.id==historySession}.coerceAtLeast(0))
+        }
+        b.spinnerSessionHistory.visibility=if(queueView==QueueView.HISTORY)View.VISIBLE else View.GONE
+        val data=QueueViews.select(snapshot,queueView,historySession)
+        b.tvQueueSelection.text=data.title;b.tvTotalCompletedSets.text=data.summary;b.tvQueue.text=QueueViews.describe(data)
+    }
+    private fun showQueueViewer(){
+        val layout=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(20,8,20,8)}
+        val mode=Spinner(this).apply{adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,QueueView.values().map{it.label});setSelection(QueueView.ALL.ordinal)}
+        val options=QueueViews.options(snapshot)
+        val history=Spinner(this).apply{adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,options)}
+        val summary=TextView(this).apply{setPadding(0,8,0,8);textSize=15f}
+        val content=TextView(this).apply{setPadding(0,8,0,8);textSize=15f;setTextIsSelectable(true)}
+        val scroll=ScrollView(this).apply{addView(content)}
+        layout.addView(mode);layout.addView(history);layout.addView(summary)
+        layout.addView(scroll,LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,(resources.displayMetrics.heightPixels*0.45f).toInt()))
+        fun update(){
+            val view=QueueView.values().getOrNull(mode.selectedItemPosition) ?: QueueView.ALL
+            history.visibility=if(view==QueueView.HISTORY)View.VISIBLE else View.GONE
+            val data=QueueViews.select(snapshot,view,options.getOrNull(history.selectedItemPosition)?.id)
+            summary.text=data.title+"\n"+data.summary;content.text=QueueViews.describe(data)
+        }
+        val onSelection=object:AdapterView.OnItemSelectedListener{
+            override fun onItemSelected(parent:AdapterView<*>?,view:View?,position:Int,id:Long){update()}
+            override fun onNothingSelected(parent:AdapterView<*>?){}
+        }
+        mode.onItemSelectedListener=onSelection;history.onItemSelectedListener=onSelection;update()
+        guardDialog().setTitle("Наборы и история сессий").setView(layout).setPositiveButton("Закрыть",null).show()
     }
     private fun sync(upload:Boolean,notify:Boolean){
         if(networkBusy||halted||maintenance||dialogDepth>0)return
@@ -428,46 +504,53 @@ class MainActivity:AppCompatActivity() {
     private fun render(){
         b.btnResumeAfterUpdate.visibility=if(maintenance)View.VISIBLE else View.GONE
         val j=snapshot.current;val p=work.profile;val locked=p!=null||j!=null||halted
+        val sessionReady=SessionAccounting.ready(snapshot)
         b.profilePage.visibility=if(p==null)View.VISIBLE else View.GONE
         b.workPage.visibility=if(p!=null)View.VISIBLE else View.GONE
         b.tvScanResult.visibility=if(p!=null)View.VISIBLE else View.GONE
-        b.tvScanResult.text=if(halted)"Сканирование остановлено: ошибка сохранения." else scanResult.ifBlank{if(j==null)"Готово к сканированию набора." else "Набор открыт. Продолжайте сканировать пачки."}
+        b.tvScanResult.text=if(halted)"Сканирование остановлено: ошибка сохранения." else if(p!=null&&!sessionReady)"Нажмите «Начать новую сессию»." else scanResult.ifBlank{if(j==null)"Готово к сканированию набора." else "Набор открыт. Продолжайте сканировать пачки."}
         b.tvScanResult.setTextColor(android.graphics.Color.BLACK)
         b.tvScanResult.setBackgroundColor(if(scanResultError||halted)0xffffe0b2.toInt()else 0xffe8f5e9.toInt())
         b.profileEditor.visibility=if(editorOpen)View.VISIBLE else View.GONE
         b.btnEditProfile.text=if(editorOpen)"Закрыть настройки без сохранения" else "Настроить профиль"
         b.btnStartWork.text=if(editorOpen)"Сохранить и начать работу" else "Начать работу"
-        b.btnStartWork.isEnabled=p==null&&!halted
+        b.btnStartWork.isEnabled=p==null&&!halted&&!maintenance
+        b.btnViewQueue.isEnabled=!editorOpen&&!halted
         b.btnEditProfile.isEnabled=!locked
         b.btnNewProfile.isEnabled=!locked&&!editorOpen
         b.btnDuplicateProfile.isEnabled=!locked&&!editorOpen
         b.btnBackupAll.isEnabled=!halted&&!networkBusy&&!editorOpen
         b.btnExportProfiles.isEnabled=!halted
         b.btnImportProfiles.isEnabled=p==null&&!halted&&!editorOpen
-        b.btnImportQueue.isEnabled=p==null&&!halted&&!editorOpen&&snapshot.current==null&&snapshot.jobs.isEmpty()
+        b.btnImportQueue.isEnabled=p==null&&!halted&&!editorOpen&&SessionAccounting.emptyForImport(snapshot)
         val chosen=profiles.getOrNull(selected)
         b.tvProfileSummary.text=chosen?.let{"${it.title}\nИНН: ${it.inn.ifBlank{"не заполнен"}}\n${if(it.environment=="sandbox")"ТЕСТОВЫЙ контур" else "РЕАЛЬНЫЙ ЧЗ"}\nGTIN набора: ${it.template.setGtin.ifBlank{"не заполнен"}} · ${it.template.expected.values.sum()} шт"}?:"Выберите профиль"
         b.tvWorkProfile.text=p?.let{"${it.title}\nИНН ${it.inn} · ${if(it.environment=="sandbox")"ТЕСТОВЫЙ контур" else "РЕАЛЬНЫЙ ЧЗ"}\nПрофиль зафиксирован до выхода из сборки"}?:""
+        val session=SessionAccounting.active(snapshot)
+        b.tvWorkSession.text=when{
+            session!=null->"Текущая сессия: ${QueueViews.date(session.startedAtMs)} · ${session.profile.title}"
+            j!=null->"Незавершённый набор из «${SessionAccounting.LEGACY_TITLE}». Завершите его, затем начните новую сессию."
+            else->"Сессия ещё не начата. Старые наборы находятся в истории «${SessionAccounting.LEGACY_TITLE}»."
+        }
+        b.btnBeginSession.visibility=if(p!=null && session==null)View.VISIBLE else View.GONE
+        b.btnBeginSession.isEnabled=p!=null&&j==null&&!halted&&!maintenance
+        b.btnBackProfiles.isEnabled=!maintenance
         b.btnFlow.text=if(work.streaming)"ПАУЗА потока" else "СТАРТ потока"
-        b.btnFlow.isEnabled=p!=null&&!halted&&!maintenance&&!pairMode&&dialogDepth==0
-        b.btnScan.isEnabled=p!=null&&!halted&&!maintenance&&!pairMode&&dialogDepth==0
+        b.btnFlow.isEnabled=p!=null&&sessionReady&&!halted&&!maintenance&&!pairMode&&dialogDepth==0
+        b.btnScan.isEnabled=p!=null&&sessionReady&&!halted&&!maintenance&&!pairMode&&dialogDepth==0
         b.tvFlowState.text=when {work.streaming->"ПОТОК: подносите коды по очереди. После пачек — код следующего набора."; p!=null->"Поток на паузе. Нажмите СТАРТ один раз для всей серии наборов.";else->""}
-        b.btnResetCurrentSet.isEnabled=j!=null&&!halted
+        b.btnResetCurrentSet.isEnabled=j!=null&&!halted&&!maintenance
         b.root.keepScreenOn=work.streaming
 
         listOf<View>(b.etProfileTitle,b.etInn,b.spinnerEnvironment,b.etSetGtin,b.compositionEditor,b.btnScanSetGtin,b.btnAddCompositionRow,b.btnSaveProfile).forEach{it.isEnabled=!locked}
         b.spinnerProfiles.isEnabled=!locked&&!editorOpen
         b.btnDeleteProfile.isEnabled=!locked&&!editorOpen&&selected in profiles.indices
         b.tvConnection.text=if(pc.url.isBlank())"ПК не подключён" else "ПК: ${pc.url}"
-        b.tvScanState.text=if(halted)"ОСТАНОВЛЕНО: ошибка сохранения" else if(pairMode)"Сканируйте QR подключения ПК" else if(j==null)"Сканируйте DataMatrix НАБОРА" else "Сканируйте пачки: ${j.children.size} / ${j.template.expected.values.sum()}"
+        b.tvScanState.text=if(halted)"ОСТАНОВЛЕНО: ошибка сохранения" else if(pairMode)"Сканируйте QR подключения ПК" else if(!sessionReady)"Сначала начните новую сессию" else if(j==null)"Сканируйте DataMatrix НАБОРА" else "Сканируйте пачки: ${j.children.size} / ${j.template.expected.values.sum()}"
         b.tvCurrentSet.text=j?.let{"Набор: ${it.setCode}\nИНН ${it.inn} · ${it.environment}"}?:"Текущий набор не открыт"
         b.tvProgress.text=j?.template?.expected?.entries?.joinToString("\n"){(g,n)->"$g: ${j.children.count{it.substring(2,16)==g}} / $n"}?:"Проверьте шаблон перед сборкой"
-        val visibleJobs=snapshot.jobs.filter{work.owns(it)}
-        b.tvTotalCompletedSets.text="Этот профиль: ${visibleJobs.size}; на ТСД: ${visibleJobs.count{!it.uploaded}}; подтверждено ЧЗ: ${visibleJobs.count{it.status=="VERIFIED"}}"
+        renderQueueViews()
         b.btnSendDraft.isEnabled=!networkBusy&&!halted&&!maintenance;b.btnRefresh.isEnabled=!networkBusy&&!halted&&!maintenance
-        b.tvQueue.text=visibleJobs.asReversed().take(100).joinToString("\n\n"){
-            "…${it.setCode.takeLast(6)} · ИНН ${it.inn} · ${it.children.size} шт\n${Labels.status(it.status)}${if(it.detail.isNotBlank())"\n"+it.detail.take(350)else ""}${it.documentId?.let{d->"\nДокумент: $d"}?:""}"
-        }.ifBlank{"Готовых наборов пока нет"}
     }
     private fun attempt(block:()->Unit){try{block()}catch(e:Exception){if(e is ProfileStorageException)storageFailure(e);toast(e.message?:"Ошибка");log(e.message?:"Ошибка")}}
     private fun toast(message:String){activeToast?.cancel();activeToast=Toast.makeText(this,message,Toast.LENGTH_LONG);activeToast?.show()}
@@ -611,7 +694,7 @@ class MainActivity:AppCompatActivity() {
         if(halted)return
         val saved=runCatching{gson.fromJson(prefs.getString("work_session_profile",null),OrganizationProfile::class.java)}.getOrNull()
         val current=snapshot.current
-        val candidate=if(current!=null){
+        val candidate=SessionAccounting.active(snapshot)?.profile ?: if(snapshot.sessions!=null)null else if(current!=null){
             val match=profiles.firstOrNull{WorkSession.matches(it,current)}
             WorkSession.fromJob(current,match?.title ?: saved?.takeIf{WorkSession.matches(it,current)}?.title ?: "Незавершённый набор")
         }else saved
@@ -622,15 +705,20 @@ class MainActivity:AppCompatActivity() {
     }
     private fun requestProfilePage(){
         pauseFlow();pairMode=false
+        if(maintenance){toast("Сначала завершите проверку обновления");return}
         if(snapshot.current!=null){
             guardDialog().setTitle("Набор ещё не закончен")
                 .setMessage("Переключение профиля заблокировано. Завершите сборку или отдельно сбросьте незавершённый набор. Его состав сохранён.")
                 .setPositiveButton("Продолжить сборку",null).show();return
         }
         guardDialog().setTitle("Выйти к выбору профиля?")
-            .setMessage("Поток остановлен. Готовые наборы останутся в очереди со своим ИНН и составом. На следующем экране можно выбрать другой профиль.")
+            .setMessage("Текущая сессия завершится. Готовые наборы останутся в очереди и истории со своим ИНН и составом. На следующем экране можно выбрать другой профиль и начать новую сессию.")
             .setNegativeButton("Остаться",null).setPositiveButton("К профилям"){_,_->attempt{
-                check(prefs.edit().remove("work_session_profile").commit()) {"Не удалось сохранить выход из профиля"}
+                val next=SessionAccounting.finish(snapshot,System.currentTimeMillis())
+                if(next!=snapshot){if(!persist(next))return@attempt;snapshot=next}
+                val cacheRemoved=prefs.edit().remove("work_session_profile").commit()
+                check(cacheRemoved || snapshot.sessions!=null){"Не удалось сохранить выход из профиля"}
+                if(!cacheRemoved)log("Сессия завершена в очереди; отдельный кэш профиля будет проигнорирован при запуске.")
                 work.leave(snapshot.current);clearScanInput();applyProfile(profiles[selected]);render();b.profilePage.scrollTo(0,0)
             }}.show()
     }
@@ -638,8 +726,8 @@ class MainActivity:AppCompatActivity() {
         pauseFlow();dialogDepth++
         return AlertDialog.Builder(this).setOnDismissListener{dialogDepth=(dialogDepth-1).coerceAtLeast(0);render()}
     }
-    private fun canReceive()=work.canReceive(foreground,halted,dialogDepth>0)&&!pairMode&&!maintenance
-    private fun canFlow()=work.canTrigger(foreground,halted,dialogDepth>0)&&!pairMode&&!maintenance
+    private fun canReceive()=work.canReceive(foreground,halted,dialogDepth>0)&&!pairMode&&!maintenance&&SessionAccounting.ready(snapshot)
+    private fun canFlow()=work.canTrigger(foreground,halted,dialogDepth>0)&&!pairMode&&!maintenance&&SessionAccounting.ready(snapshot)
     private fun startFlow(){
         check(canReceive()){ "Сначала войдите в рабочий экран и закройте диалог" }
         clearScanInput();b.etScanInput.requestFocus();hideKeyboard()

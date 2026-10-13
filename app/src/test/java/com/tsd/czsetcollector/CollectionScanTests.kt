@@ -12,10 +12,11 @@ class CollectionScanTests {
     private val set=code(setGtin,1)
     private val unit=code(unitGtin,2)
     private val unit2=code(unitGtin,3)
+    private fun started(before:Snapshot=Snapshot())=SessionAccounting.begin(before,profile,1700000000000)
     private fun current(children:MutableList<String> = mutableListOf())=Job(inn=profile.inn,template=template,setCode=set,children=children)
 
     @Test fun openingIsReportedOnlyAfterSuccessfulSaveAndInputRemainsUntouched() {
-        val before=Snapshot();var writes=0
+        val before=started();var writes=0
         val result=CollectionScan.accept(before,profile,set){next->
             writes++;assertNull(before.current);assertEquals(set,next.current?.setCode);true
         }!!
@@ -88,10 +89,10 @@ class CollectionScanTests {
         rejected(code(unitGtin,4));rejected(code("04607010740030",5))
     }
     @Test fun priorCancelExceptionAndEnvironmentSeparationRemainUnchanged() {
-        val cancelled=current().copy(status="CANCELLED_LOCAL")
-        val test=current().copy(environment="sandbox")
+        val cancelled=current(mutableListOf(unit,unit2)).copy(status="CANCELLED_LOCAL")
+        val test=current(mutableListOf(unit,unit2)).copy(environment="sandbox")
         for(job in listOf(cancelled,test)) {
-            val result=CollectionScan.accept(Snapshot(null,mutableListOf(job)),profile,set){true}!!
+            val result=CollectionScan.accept(started(Snapshot(null,mutableListOf(job))),profile,set){true}!!
             assertEquals(ScanSignal.OPENED,result.signal);assertSame(job,result.snapshot.jobs.single())
         }
     }

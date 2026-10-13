@@ -37,13 +37,14 @@ object CollectionScan {
             else -> null
         }
         if(duplicate!=null)return CollectionResult(before,ScanSignal.DUPLICATE,duplicate)
+        require(SessionAccounting.ready(before)){"Сначала нажмите «Начать новую сессию»"}
         val next:Snapshot
         val signal:ScanSignal?
         val message:String
         if(current==null) {
             require(code.substring(2,16)==profile.template.setGtin){"Сначала сканируйте код НАБОРА с GTIN ${profile.template.setGtin}"}
-            next=Snapshot(Job(environment=profile.environment,inn=profile.inn,pg=profile.pg,
-                template=profile.template,setCode=code),before.jobs.toMutableList())
+            next=SessionAccounting.attachCurrent(before.copy(current=Job(environment=profile.environment,inn=profile.inn,pg=profile.pg,
+                template=profile.template,setCode=code),jobs=before.jobs.toMutableList()))
             signal=ScanSignal.OPENED
             message="Набор открыт. Сканируйте пачки."
         } else {
@@ -53,11 +54,11 @@ object CollectionScan {
             val changed=current.copy(children=(current.children+code).toMutableList())
             if(changed.children.size==changed.template.expected.values.sum()) {
                 changed.status="LOCAL_READY"
-                next=Snapshot(null,(before.jobs+changed).toMutableList())
+                next=before.copy(current=null,jobs=(before.jobs+changed).toMutableList())
                 signal=ScanSignal.COMPLETED
                 message="Набор собран и сохранён на ТСД. Сканируйте следующий набор."
             } else {
-                next=Snapshot(changed,before.jobs.toMutableList())
+                next=before.copy(current=changed,jobs=before.jobs.toMutableList())
                 signal=null
                 message="Пачка сохранена: ${changed.children.size} / ${changed.template.expected.values.sum()}."
             }

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib import request, error, parse
 
-VERSION = '1.3.3'
+VERSION = '1.3.4'
 HOSTS = {'production': 'https://markirovka.crpt.ru',
          'sandbox': 'https://markirovka.sandbox.crptech.ru'}
 MAX_BYTES = 2_000_000
@@ -24,7 +24,7 @@ MAX_SELECTION = 500
 STATES = {'WAITING_SIGNATURE','SUBMITTING','SUBMITTED','PROCESSING',
           'VERIFIED','REJECTED','UNKNOWN','BLOCKED','CHECK_REQUIRED','CANCELLED_LOCAL'}
 STATUS_RU = {'WAITING_SIGNATURE':'Ожидает подписи на ПК', 'SUBMITTING':'Отправляется',
-             'SUBMITTED':'Передан в ЧЗ', 'PROCESSING':'Обрабатывается в ЧЗ',
+             'SUBMITTED':'Передан в ЧЗ — результат ещё не проверен', 'PROCESSING':'Последняя проверка: ЧЗ обрабатывает',
              'VERIFIED':'Сформирован: состав проверен', 'REJECTED':'Отклонён ЧЗ',
              'UNKNOWN':'Результат отправки неизвестен — НЕ повторять',
              'BLOCKED':'Не отправлен: требуется исправление',
@@ -427,18 +427,24 @@ class Engine:
         validate_batch(jobs)
         groups=collections.defaultdict(list)
         for j in jobs:
-            if j['status'] not in {'WAITING_SIGNATURE','BLOCKED','CANCELLED_LOCAL','VERIFIED'}:
+            if j['status'] not in {'CANCELLED_LOCAL','VERIFIED'}:
                 groups[j['documentId']].append(j)
         for doc,group in groups.items():
             if not doc:
-                try: info=api.codes([j['setCode'] for j in group])
-                except ApiError as e:
-                    self.store.change_many(group,'UNKNOWN',str(e)+'\nНе отправляйте повторно. Проверьте ЛК ЧЗ.')
-                    continue
+                # Refresh is read-only. Expired authorization/network errors must reach the
+                # connection diagnostics without turning unsent jobs into unknown submissions.
+                info=api.codes([j['setCode'] for j in group])
                 for j in group:
                     try: verify_set(j,info)
                     except (ValidationError,ApiError) as e:
-                        self.store.change(j['id'],'UNKNOWN',str(e)+'\nНе отправляйте повторно. Проверьте ЛК ЧЗ.')
+                        if j['status'] in {'WAITING_SIGNATURE','BLOCKED'}:
+                            parent=info[j['setCode']]
+                            # A code that has not formed yet keeps its original waiting/error
+                            # state. Evidence of formation protects it from another submission.
+                            if parent.get('status')=='INTRODUCED' or child_codes(parent):
+                                self.store.change(j['id'],'CHECK_REQUIRED',str(e)+'\nВ ЧЗ есть признаки сформированного набора; повторная отправка запрещена.')
+                        else:
+                            self.store.change(j['id'],'UNKNOWN',str(e)+'\nНе отправляйте повторно. Проверьте ЛК ЧЗ.')
                     else:
                         self.store.change(j['id'],'VERIFIED','Восстановлено по ЧЗ: владелец, статус и полный состав совпали. ID документа не восстановлен.')
                 continue
@@ -446,7 +452,8 @@ class Engine:
             if status=='CHECKED_OK':
                 try: info=api.codes([j['setCode'] for j in group])
                 except ApiError as e:
-                    self.store.change_many(group,'CHECK_REQUIRED','Документ обработан, но '+str(e));continue
+                    if e.http_status in {401,403}: raise
+                    self.store.change_many(group,'CHECK_REQUIRED','Документ обработан, но '+str(e));raise
                 for j in group:
                     try: verify_set(j,info)
                     except (ValidationError,ApiError) as e:
@@ -461,21 +468,4 @@ class Engine:
                 self.store.change_many(group,'PROCESSING',status+': '+detail)
         return self.store.get_many(idents)
     def refresh(self,ident: str,api: TrueApi):
-        j=self.store.get(ident)
-        if j['status'] in {'WAITING_SIGNATURE','BLOCKED','CANCELLED_LOCAL','VERIFIED'}: return j
-        if not j['documentId']:
-            try: verify_set(j,api.codes([j['setCode']]))
-            except (ValidationError,ApiError) as e:
-                return self.store.change(ident,'UNKNOWN',str(e)+'\nНе отправляйте повторно. Проверьте ЛК ЧЗ.')
-            return self.store.change(ident,'VERIFIED','Восстановлено по ЧЗ: владелец, статус и полный состав совпали. ID документа не восстановлен.')
-        status,detail=document_status(api.document_info(j['documentId']))
-        if status=='CHECKED_OK':
-            try: verify_set(j,api.codes([j['setCode']]))
-            except (ValidationError,ApiError) as e:
-                return self.store.change(ident,'CHECK_REQUIRED','Документ обработан, но '+str(e))
-            return self.store.change(ident,'VERIFIED','Документ обработан, владелец и полный состав проверены.')
-        if status in {'CHECKED_NOT_OK','PARSE_ERROR','PROCESSING_ERROR','CANCELLED'}:
-            return self.store.change(ident,'REJECTED',status+': '+detail)
-        if status=='UNRECOGNIZED':
-            return self.store.change(ident,'CHECK_REQUIRED','Неизвестный формат статуса документа: '+detail)
-        return self.store.change(ident,'PROCESSING',status+': '+detail)
+        return self.refresh_many([ident],api)[0]
