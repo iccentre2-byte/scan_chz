@@ -58,7 +58,7 @@ jobs:
           cp app/build/outputs/apk/pilotUpdate/app-pilotUpdate.apk dist/CHZ-1.3.3-pilot-update.apk
           python tools/release_manifest.py dist "$GITHUB_SHA" "$ANDROID_HOME/build-tools/34.0.0"
           cp tools/*.ps1 tools/*.cmd tools/signing-certificate-sha256.txt dist/
-          cp docs/INSTALL_1_3_1_RU.txt dist/
+          cp docs/INSTALL_1_3_3_RU.txt dist/
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'pull_request'
         with:

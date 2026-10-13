@@ -2,6 +2,7 @@ package com.tsd.czsetcollector
 
 import com.google.gson.Gson
 import com.google.gson.JsonObject
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -12,6 +13,7 @@ import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
 import java.io.InterruptedIOException
+import java.net.InetAddress
 import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -31,12 +33,16 @@ class PcClientTransportTests {
         add("documentId", com.google.gson.JsonNull.INSTANCE)
         remove("uploaded"); addProperty("payloadHash", "b".repeat(64)); addProperty("updated", 1234.0)
     }.toString()
-    private fun client(httpClient: OkHttpClient = http) = PcClient(config, PcHttpTransport(server.url("/").toString(), config.key, httpClient))
+    // MockWebServer's canonical localhost URL may resolve to both families. Once an interrupted
+    // exchange marks one route failed, a retry can select ::1 although the mock only bound IPv4.
+    // Production PC addresses are literal IPv4 too. Pin both halves of this fixture accordingly.
+    private fun fixtureUrl() = server.url("/").newBuilder().host("127.0.0.1").build().toString()
+    private fun client(httpClient: OkHttpClient = http) = PcClient(config, PcHttpTransport(fixtureUrl(), config.key, httpClient))
     private fun failure(block: () -> Unit): Exception {
         try { block(); fail("Expected refusal") } catch (error: Exception) { return error }
         error("unreachable")
     }
-    @Before fun start() { server.start() }
+    @Before fun start() { server.start(InetAddress.getByName("127.0.0.1"), 0) }
     @After fun stop() { server.shutdown(); http.connectionPool.evictAll(); http.dispatcher.executorService.shutdownNow() }
 
     @Test fun interruptedGetBodyIsReadAgainOnFreshHttp11Connection() {
@@ -49,6 +55,23 @@ class PcClientTransportTests {
             val request = server.takeRequest(1, TimeUnit.SECONDS)!!
             assertEquals("GET", request.method); assertEquals("/v1/jobs/${job.id}", request.path)
             assertEquals("close", request.getHeader("Connection")); assertTrue(request.requestLine.endsWith("HTTP/1.1"))
+            assertEquals(0, request.sequenceNumber)
+        }
+    }
+
+    @Test fun recoveryUsesLiteralBoundAddressWithoutLocalhostDnsFallback() {
+        val noAliases = http.newBuilder().dns(object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> =
+                throw AssertionError("Literal IPv4 fixture must not resolve a localhost alias: $hostname")
+        }).build()
+        val job = job()
+        server.enqueue(MockResponse().setBody(reply(job)).setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY))
+        server.enqueue(MockResponse().setBody(reply(job)))
+        assertEquals(job.id, client(noAliases).status(job.id).id)
+        assertEquals(2, server.requestCount)
+        repeat(2) {
+            val request = server.takeRequest(1, TimeUnit.SECONDS)!!
+            assertEquals("GET", request.method); assertEquals(0, request.sequenceNumber)
         }
     }
 
