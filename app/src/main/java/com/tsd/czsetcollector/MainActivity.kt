@@ -40,6 +40,7 @@ class MainActivity:AppCompatActivity() {
     private var selected=0
     private var halted=false
     private var networkBusy=false
+    private var maintenance=false
     private var pairMode=false
     private var pc=PcConfig()
     private var foreground=false
@@ -48,8 +49,10 @@ class MainActivity:AppCompatActivity() {
     private var editorOpen=false
     private var editingIndex:Int?=null
     private var editorScanTarget:GtinInput?=null
-    private var lastCode=""
-    private var lastCodeAt=0L
+    private val scanEcho=ScanEchoGuard()
+    private var scanFeedback:ScanFeedback?=null
+    private var scanResult=""
+    private var scanResultError=false
     private var keyboardSuppressed=false
     private var activeToast:Toast?=null
     private val importProfiles=registerForActivityResult(ActivityResultContracts.OpenDocument()){uri->
@@ -115,7 +118,9 @@ class MainActivity:AppCompatActivity() {
     }
     override fun onCreate(savedInstanceState:Bundle?) {
         super.onCreate(savedInstanceState);b=ActivityMainBinding.inflate(layoutInflater);setContentView(b.root)
+        maintenance=intent?.getBooleanExtra("chz_maintenance",false)==true
         prefs=getSharedPreferences("cz_multi_profiles",Context.MODE_PRIVATE);store=QueueStore(filesDir);profileStore=ProfileStore(prefs,filesDir)
+        scanFeedback=ScanFeedback(this,prefs.getBoolean("scan_sound",true),prefs.getBoolean("scan_voice",true))
         b.tvLog.movementMethod=ScrollingMovementMethod()
         b.tvAppVersion.text="${BuildConfig.VERSION_NAME} · Профиль → Сборка · Поток"
         try {snapshot=store.load()} catch(e:Exception){storageFailure(e)}
@@ -139,10 +144,15 @@ class MainActivity:AppCompatActivity() {
     }
     override fun onNewIntent(intent:Intent?) {
         super.onNewIntent(intent)
-        if(intent!=null){setIntent(intent);handleStagedMigration(intent);handleBackupRequest(intent)}
+        if(intent!=null){
+            setIntent(intent)
+            if(intent.hasExtra("chz_maintenance")){maintenance=intent.getBooleanExtra("chz_maintenance",false);pauseFlow();render()}
+            handleStagedMigration(intent);handleBackupRequest(intent)
+        }
     }
     override fun onResume(){
         super.onResume();foreground=true
+        scanFeedback?.resume()
         val f=IntentFilter().apply {
             addAction("com.android.server.scannerservice.broadcast");addAction("com.m3.scan.action.SCANNER_OUTPUT")
             addAction("android.intent.ACTION_DECODE_DATA");addAction("com.scan.output");addAction("com.tsd.czsetcollector.SCAN_ACTION")
@@ -152,14 +162,17 @@ class MainActivity:AppCompatActivity() {
     }
     override fun onPause(){
         foreground=false;mainHandler.removeCallbacks(poll);pairMode=false;pauseFlow();clearScanInput()
+        scanFeedback?.pause()
         try{unregisterReceiver(receiver)}catch(e:Exception){};super.onPause()
     }
     override fun onWindowFocusChanged(hasFocus:Boolean){
         super.onWindowFocusChanged(hasFocus)
         if(!hasFocus && ::b.isInitialized && work.streaming)pauseFlow()
     }
-    override fun onDestroy(){scope.cancel();mainHandler.removeCallbacksAndMessages(null);super.onDestroy()}
+    override fun onDestroy(){scanFeedback?.pause();scope.cancel();mainHandler.removeCallbacksAndMessages(null);super.onDestroy()}
     private fun listeners(){
+        b.btnResumeAfterUpdate.setOnClickListener{maintenance=false;render()}
+        b.btnFeedbackSettings.setOnClickListener{feedbackSettings()}
         b.spinnerProfiles.onItemSelectedListener=object:AdapterView.OnItemSelectedListener{
             override fun onItemSelected(parent:AdapterView<*>?,view:View?,position:Int,id:Long){
                 if(work.profile!=null || halted || editorOpen || position !in profiles.indices)return
@@ -202,6 +215,8 @@ class MainActivity:AppCompatActivity() {
                 check(prefs.edit().putString("work_session_profile",gson.toJson(work.profile)).commit()) {"Не удалось сохранить выбранный профиль"}
             } catch(e:Exception) {work.leave(null);throw e}
             editorOpen=false;editingIndex=null;editorScanTarget=null;clearScanInput();hideKeyboard();render()
+            scanResult=if(snapshot.current==null)"Готово к сканированию набора."else "Набор открыт. Продолжайте сканировать пачки."
+            scanResultError=false;render()
             b.workPage.scrollTo(0,0);b.etScanInput.requestFocus()
             log("Начата работа: ${p.title}. Профиль нельзя переключить внутри сборки.")
         }}
@@ -237,7 +252,7 @@ class MainActivity:AppCompatActivity() {
             val j=snapshot.current?:return@setOnClickListener
             guardDialog().setTitle("Сбросить незавершённый набор?")
                 .setMessage("Пачек: ${j.children.size}. Этот набор ещё не передавался на ПК. Готовые наборы не будут удалены.")
-                .setNegativeButton("Отмена",null).setPositiveButton("Сбросить"){_,_->snapshot.current=null;persist();pauseFlow();clearScanInput();render()}.show()
+                .setNegativeButton("Отмена",null).setPositiveButton("Сбросить"){_,_->snapshot.current=null;persist();pauseFlow();clearScanInput();showScanResult("Незавершённый набор сброшен. Готово к следующему набору.")}.show()
         }
         b.btnShareLog.setOnClickListener{share(logFile,"text/plain")}
         b.btnBackup.setOnClickListener{
@@ -300,7 +315,7 @@ class MainActivity:AppCompatActivity() {
             Template(gtin,b.compositionEditor.composition()))
     }
     private fun scan(raw:String){
-        if(halted || !foreground || dialogDepth>0)return
+        if(halted || maintenance || !foreground || dialogDepth>0)return
         if(editorOpen && work.profile==null && !pairMode){
             attempt{
                 val target=checkNotNull(editorScanTarget){"Нажмите «Скан» рядом с GTIN набора или пачки"}
@@ -320,41 +335,39 @@ class MainActivity:AppCompatActivity() {
         if(!canReceive())return
         mainHandler.removeCallbacks(scanPulse);mainHandler.removeCallbacks(restartScan)
         if(work.streaming)stopSoftwareScanTrigger()
-        try { attempt{
+        try {
             val profile=checkNotNull(work.profile){"Сначала выберите профиль"}
             val code=Codes.normalize(raw)
             val now=SystemClock.elapsedRealtime()
-            if(code==lastCode && now-lastCodeAt<700)return@attempt
-            lastCode=code;lastCodeAt=now
-            val current=snapshot.current
-            require(current==null || work.owns(current)){"Состав незавершённого набора не соответствует рабочему профилю"}
-            val env=profile.environment
-            require(snapshot.jobs.none{it.status!="CANCELLED_LOCAL"&&it.environment==env&&(it.setCode==code||it.children.contains(code))}){"Код уже использован в другом собранном наборе"}
-            if(current==null){
-                require(code.substring(2,16)==profile.template.setGtin){"Сначала сканируйте код НАБОРА с GTIN ${profile.template.setGtin}"}
-                snapshot.current=Job(environment=profile.environment,inn=profile.inn,template=profile.template,setCode=code)
-                if(!persist())return@attempt
-                log("Набор открыт: …${code.takeLast(6)}")
-            }else{
-                require(code!=current.setCode){"Это код самого набора"};require(!current.children.contains(code)){"Дубликат пачки в наборе"}
-                val gtin=code.substring(2,16);val expected=current.template.expected[gtin]?:0
-                require(expected>0){"Этого GTIN нет в составе шаблона: $gtin"}
-                require(current.children.count{it.substring(2,16)==gtin}<expected){"По GTIN $gtin уже набрано нужное количество"}
-                current.children.add(code)
-                if(current.children.size==current.template.expected.values.sum()){
-                    current.status="LOCAL_READY";snapshot.jobs.add(current);snapshot.current=null
-                    if(!persist())return@attempt
-                    log("Собран на ТСД, не в ЧЗ: …${current.setCode.takeLast(6)}");toast("Набор сохранён. Можно сканировать следующий.")
-                }else{
-                    if(!persist())return@attempt
-                    // Only the single guarded flow scheduler may restart the scanner.
-                }
+            if(!scanEcho.accept(code,now))return
+            val result=CollectionScan.accept(snapshot,profile,code){next->persist(next)}
+            if(result==null){showScanResult("Код не принят: ошибка сохранения.",true);return}
+            snapshot=result.snapshot
+            showScanResult(result.message,result.signal==ScanSignal.DUPLICATE)
+            result.signal?.let{signal->
+                scanFeedback?.play(signal)
+                log(result.message)
             }
-            render()
-        }} finally {scheduleScan(220)}
+        } catch(e:Exception) {
+            showScanResult("Код не принят: ${e.message?:"Ошибка"}",true)
+            toast(e.message?:"Ошибка");log(e.message?:"Ошибка")
+        } finally {scheduleScan(220)}
+    }
+    private fun showScanResult(message:String,error:Boolean=false){scanResult=message;scanResultError=error;render()}
+    private fun feedbackSettings(){
+        val layout=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(24,12,24,12)}
+        val sound=CheckBox(this).apply{text="Короткие звуковые сигналы";isChecked=prefs.getBoolean("scan_sound",true)}
+        val voice=CheckBox(this).apply{text="Голос: набор открыт, набор собран, дубль";isChecked=prefs.getBoolean("scan_voice",true)}
+        val note=TextView(this).apply{text="${scanFeedback?.voiceStatus.orEmpty()}\nГромкость — мультимедиа ТСД. «Набор собран» означает сохранение на ТСД. Подпись и отправка в ЧЗ выполняются на ПК.";setPadding(0,12,0,12)}
+        listOf(sound,voice,note).forEach{layout.addView(it)}
+        guardDialog().setTitle("Звук и голос").setView(layout).setNegativeButton("Отмена",null)
+            .setPositiveButton("Сохранить"){_,_->attempt{
+                check(prefs.edit().putBoolean("scan_sound",sound.isChecked).putBoolean("scan_voice",voice.isChecked).commit()){"Не удалось сохранить настройки сигналов"}
+                scanFeedback?.configure(sound.isChecked,voice.isChecked)
+            }}.show()
     }
     private fun sync(upload:Boolean,notify:Boolean){
-        if(networkBusy||halted)return
+        if(networkBusy||halted||maintenance||dialogDepth>0)return
         if(pc.url.isBlank()){if(notify)connectDialog();return}
         // A manual transfer from this work page sends only its frozen profile's jobs.
         val toUpload=if(upload)snapshot.jobs.filter{!it.uploaded&&it.status=="LOCAL_READY"&&work.owns(it)}else emptyList()
@@ -379,7 +392,7 @@ class MainActivity:AppCompatActivity() {
         }
     }
     private fun applyReply(original:Job,reply:Job){
-        require(reply.id==original.id&&reply.inn==original.inn&&reply.environment==original.environment&&
+        require(reply.schemaVersion==original.schemaVersion&&reply.pg==original.pg&&reply.id==original.id&&reply.inn==original.inn&&reply.environment==original.environment&&
             reply.setCode==original.setCode&&reply.children.toSet()==original.children.toSet()&&reply.children.size==original.children.size&&
             reply.template==original.template){"ПК вернул другой состав. Ответ не принят"}
         require(reply.status in setOf("WAITING_SIGNATURE","SUBMITTING","SUBMITTED","PROCESSING","VERIFIED","REJECTED","UNKNOWN","BLOCKED","CHECK_REQUIRED","CANCELLED_LOCAL")){"Неизвестный статус ПК"}
@@ -399,7 +412,7 @@ class MainActivity:AppCompatActivity() {
             .setPositiveButton("Сохранить"){_,_->attempt{val c=PcConfig(url.text.toString().trim().trimEnd('/'),key.text.toString().trim(),pin.text.toString().trim());PcClient.validate(c);savePc(c)}}.show()
     }
     private fun savePc(c:PcConfig){pc=c;prefs.edit().putString("pc_connection",gson.toJson(c)).commit();render();log("Подключение к ПК сохранено: ${c.url}")}
-    private fun persist():Boolean=try{store.save(snapshot);true}catch(e:Exception){storageFailure(e);false}
+    private fun persist(next:Snapshot=snapshot):Boolean=try{store.save(next);true}catch(e:Exception){storageFailure(e);false}
     private fun readStoredQueue():Snapshot=try{store.load()}catch(e:Exception){storageFailure(e);throw e}
     private fun readStoredProfiles():ProfileData=try{profileStore.repository.load()}catch(e:Exception){storageFailure(e);throw e}
     private fun storageFailure(e:Exception){
@@ -409,9 +422,14 @@ class MainActivity:AppCompatActivity() {
             .setPositiveButton("Понятно",null).show();render()
     }
     private fun render(){
+        b.btnResumeAfterUpdate.visibility=if(maintenance)View.VISIBLE else View.GONE
         val j=snapshot.current;val p=work.profile;val locked=p!=null||j!=null||halted
         b.profilePage.visibility=if(p==null)View.VISIBLE else View.GONE
         b.workPage.visibility=if(p!=null)View.VISIBLE else View.GONE
+        b.tvScanResult.visibility=if(p!=null)View.VISIBLE else View.GONE
+        b.tvScanResult.text=if(halted)"Сканирование остановлено: ошибка сохранения." else scanResult.ifBlank{if(j==null)"Готово к сканированию набора."else "Набор открыт. Продолжайте сканировать пачки."}
+        b.tvScanResult.setTextColor(android.graphics.Color.BLACK)
+        b.tvScanResult.setBackgroundColor(if(scanResultError||halted)0xffffe0b2.toInt()else 0xffe8f5e9.toInt())
         b.profileEditor.visibility=if(editorOpen)View.VISIBLE else View.GONE
         b.btnEditProfile.text=if(editorOpen)"Закрыть настройки без сохранения" else "Настроить профиль"
         b.btnStartWork.text=if(editorOpen)"Сохранить и начать работу" else "Начать работу"
@@ -427,8 +445,8 @@ class MainActivity:AppCompatActivity() {
         b.tvProfileSummary.text=chosen?.let{"${it.title}\nИНН: ${it.inn.ifBlank{"не заполнен"}}\n${if(it.environment=="sandbox")"ТЕСТОВЫЙ контур" else "РЕАЛЬНЫЙ ЧЗ"}\nGTIN набора: ${it.template.setGtin.ifBlank{"не заполнен"}} · ${it.template.expected.values.sum()} шт"}?:"Выберите профиль"
         b.tvWorkProfile.text=p?.let{"${it.title}\nИНН ${it.inn} · ${if(it.environment=="sandbox")"ТЕСТОВЫЙ контур" else "РЕАЛЬНЫЙ ЧЗ"}\nПрофиль зафиксирован до выхода из сборки"}?:""
         b.btnFlow.text=if(work.streaming)"ПАУЗА потока" else "СТАРТ потока"
-        b.btnFlow.isEnabled=p!=null&&!halted&&!pairMode&&dialogDepth==0
-        b.btnScan.isEnabled=p!=null&&!halted&&!pairMode&&dialogDepth==0
+        b.btnFlow.isEnabled=p!=null&&!halted&&!maintenance&&!pairMode&&dialogDepth==0
+        b.btnScan.isEnabled=p!=null&&!halted&&!maintenance&&!pairMode&&dialogDepth==0
         b.tvFlowState.text=when {work.streaming->"ПОТОК: подносите коды по очереди. После пачек — код следующего набора."; p!=null->"Поток на паузе. Нажмите СТАРТ один раз для всей серии наборов.";else->""}
         b.btnResetCurrentSet.isEnabled=j!=null&&!halted
         b.root.keepScreenOn=work.streaming
@@ -442,7 +460,7 @@ class MainActivity:AppCompatActivity() {
         b.tvProgress.text=j?.template?.expected?.entries?.joinToString("\n"){(g,n)->"$g: ${j.children.count{it.substring(2,16)==g}} / $n"}?:"Проверьте шаблон перед сборкой"
         val visibleJobs=snapshot.jobs.filter{work.owns(it)}
         b.tvTotalCompletedSets.text="Этот профиль: ${visibleJobs.size}; на ТСД: ${visibleJobs.count{!it.uploaded}}; подтверждено ЧЗ: ${visibleJobs.count{it.status=="VERIFIED"}}"
-        b.btnSendDraft.isEnabled=!networkBusy&&!halted;b.btnRefresh.isEnabled=!networkBusy&&!halted
+        b.btnSendDraft.isEnabled=!networkBusy&&!halted&&!maintenance;b.btnRefresh.isEnabled=!networkBusy&&!halted&&!maintenance
         b.tvQueue.text=visibleJobs.asReversed().take(100).joinToString("\n\n"){
             "…${it.setCode.takeLast(6)} · ИНН ${it.inn} · ${it.children.size} шт\n${Labels.status(it.status)}${if(it.detail.isNotBlank())"\n"+it.detail.take(350)else ""}${it.documentId?.let{d->"\nДокумент: $d"}?:""}"
         }.ifBlank{"Готовых наборов пока нет"}
@@ -616,8 +634,8 @@ class MainActivity:AppCompatActivity() {
         pauseFlow();dialogDepth++
         return AlertDialog.Builder(this).setOnDismissListener{dialogDepth=(dialogDepth-1).coerceAtLeast(0);render()}
     }
-    private fun canReceive()=work.canReceive(foreground,halted,dialogDepth>0)&&!pairMode
-    private fun canFlow()=work.canTrigger(foreground,halted,dialogDepth>0)&&!pairMode
+    private fun canReceive()=work.canReceive(foreground,halted,dialogDepth>0)&&!pairMode&&!maintenance
+    private fun canFlow()=work.canTrigger(foreground,halted,dialogDepth>0)&&!pairMode&&!maintenance
     private fun startFlow(){
         check(canReceive()){ "Сначала войдите в рабочий экран и закройте диалог" }
         clearScanInput();b.etScanInput.requestFocus();hideKeyboard()

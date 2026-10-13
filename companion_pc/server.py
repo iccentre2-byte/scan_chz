@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import concurrent.futures
+import collections
 import hmac
 import io
 import ipaddress
@@ -12,6 +13,8 @@ import json
 import os
 import secrets
 import socket
+import ssl
+import sqlite3
 import threading
 import time
 import uuid
@@ -19,12 +22,28 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
-from core import Store, Engine, TrueApi, ValidationError, ApiError, VERSION, MAX_BYTES, dumps, STATUS_RU
+from core import Store, Engine, TrueApi, ValidationError, ApiError, VERSION, MAX_BYTES, MAX_SELECTION, dumps, STATUS_RU
 from signer import WindowsSigner, certificates
 from transport import setup
 
 ROOT=Path(__file__).resolve().parent
 ACTIVE={'SUBMITTED','PROCESSING','CHECK_REQUIRED','UNKNOWN'}
+
+def backup_existing_queue(data_dir):
+    """Read-only copy before startup recovery. Never copy TLS or pairing secrets."""
+    source=Path(data_dir)/'queue.sqlite3'
+    if not source.is_file(): return None
+    dest=Path(data_dir)/('backup-before-'+VERSION+'-'+time.strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:6]+'.sqlite3')
+    src=sqlite3.connect(source.resolve().as_uri()+'?mode=ro',uri=True,timeout=15)
+    target=sqlite3.connect(dest)
+    try:
+        src.backup(target)
+        if target.execute('PRAGMA quick_check').fetchone()[0]!='ok':
+            raise ValidationError('Резервная копия очереди повреждена. Запуск остановлен; исходные данные сохранены.')
+        # Read every archived payload too, so invalid UTF-8/JSON is found before startup writes.
+        for (payload,) in target.execute('SELECT payload FROM jobs'): json.loads(payload)
+    finally: target.close();src.close()
+    return dest
 
 def is_lan_v4(host):
     try:
@@ -63,18 +82,18 @@ class State:
     def schedule(self, action, payload):
         if payload.get('confirmed') is not True: raise ValidationError('Нужно явное подтверждение на ПК')
         items=payload.get('items')
-        if not isinstance(items,list) or not 1<=len(items)<=50: raise ValidationError('Выберите от 1 до 50 наборов')
+        if not isinstance(items,list) or not 1<=len(items)<=MAX_SELECTION: raise ValidationError(f'Выберите от 1 до {MAX_SELECTION} наборов')
         snapshot=[]; seen=set()
-        for item in items:
-            j=self.store.get(str(uuid.UUID(item['id'])))
+        rows=self.store.get_many([str(uuid.UUID(item['id'])) for item in items])
+        for item,j in zip(items,rows):
             if j['id'] in seen: raise ValidationError('Повтор задания')
             if not hmac.compare_digest(j['payloadHash'], str(item.get('hash',''))):
                 raise ValidationError('Состав изменился. Обновите окно и проверьте ещё раз')
             if action=='submit' and j['status'] not in {'WAITING_SIGNATURE','BLOCKED'}:
                 raise ValidationError('В выборе есть уже отправленный набор; повторная отправка запрещена')
             seen.add(j['id']); snapshot.append(j)
-        if len({(j['inn'],j['environment']) for j in snapshot})!=1:
-            raise ValidationError('За один раз выбирайте наборы одного ИНН и одного контура')
+        if len({(j['inn'],j['environment'],j['pg']) for j in snapshot})!=1:
+            raise ValidationError('За один раз выбирайте наборы одного ИНН, контура и товарной группы')
         signer=WindowsSigner(payload.get('thumbprint',''))
         ident=str(uuid.uuid4())
         with self.op_lock:
@@ -91,10 +110,10 @@ class State:
                 # Authentication signature is deliberately initiated only by a local user's action.
                 api=TrueApi(first['environment']); api.authenticate(signer,first['inn'])
                 self.sessions[key]=(api,time.time())
-                for j in jobs:
-                    if action=='submit': self.engine.submit(j['id'],api,signer)
-                    else: self.engine.refresh(j['id'],api)
-                    op['done']+=1
+                ids=[j['id'] for j in jobs]
+                if action=='submit': result=self.engine.submit_many(ids,api,signer)
+                else: result=self.engine.refresh_many(ids,api)
+                op['done']=len(result)
             op['state']='DONE'
         except Exception as e:
             op['state']='ERROR'; op['error']=str(e)[:3000]
@@ -102,23 +121,40 @@ class State:
         while not self.stop.wait(20):
             if not self.api_lock.acquire(blocking=False): continue
             try:
+                groups=collections.defaultdict(list)
                 for j in self.store.all():
                     if j['status'] not in ACTIVE: continue
                     matches=[v for k,v in self.sessions.items() if k[:2]==(j['environment'],j['inn'])]
                     if not matches: continue
                     api,created=max(matches,key=lambda x:x[1])
                     if time.time()-created>8*3600: continue
-                    try: self.engine.refresh(j['id'],api)
-                    except (ApiError,ValidationError): pass # Preserve state; never re-authenticate or re-submit in a timer.
+                    groups[(j['environment'],j['inn'],j['pg'],api)].append(j['id'])
+                for (_,_,_,api),ids in groups.items():
+                    for start in range(0,len(ids),MAX_SELECTION):
+                        try: self.engine.refresh_many(ids[start:start+MAX_SELECTION],api)
+                        except (ApiError,ValidationError): pass # Read only; never re-authenticate or re-submit in a timer.
             finally: self.api_lock.release()
     def public_jobs(self):
         return [dict(j,statusRu=STATUS_RU.get(j['status'],j['status'])) for j in self.store.all()]
+    def public_operations(self):
+        with self.op_lock: return {k:dict(v) for k,v in self.operations.items()}
 
 class Server(ThreadingHTTPServer):
     daemon_threads=True
     allow_reuse_address=False
+    tls_context=None
+    def process_request_thread(self, connection, address):
+        # TLS handshake in a worker: an idle peer cannot block every TSD request in accept().
+        if self.tls_context is not None:
+            try:
+                connection.settimeout(15)
+                connection=self.tls_context.wrap_socket(connection,server_side=True)
+            except (OSError,ssl.SSLError):
+                self.shutdown_request(connection);return
+        super().process_request_thread(connection,address)
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version='HTTP/1.1'
     server_version='CHZ-Local/1.3'
     def log_message(self, *args): pass # No pairing keys, authorization headers, or individual marking codes in access logs.
     def setup(self):
@@ -131,6 +167,7 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(body,bytes): body=dumps(body).encode()
         self.send_response(code)
         self.send_header('Content-Type',mime); self.send_header('Content-Length',str(len(body)))
+        self.send_header('Connection','close');self.close_connection=True
         self.send_header('Cache-Control','no-store'); self.send_header('X-Content-Type-Options','nosniff')
         self.send_header('Referrer-Policy','no-referrer')
         self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
@@ -188,11 +225,14 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/v1/jobs' and method=='POST':
                 self.response(200,self.state.store.enqueue(self.read_json())); return
             if path.startswith('/v1/jobs/') and method=='GET':
-                ident=str(uuid.UUID(path.split('/')[-1])); self.response(200,self.state.store.get(ident)); return
+                ident=str(uuid.UUID(path.split('/')[-1]))
+                try: job=self.state.store.get(ident)
+                except KeyError: self.response(404,{'error':'Набор с этим UUID ещё не принят на ПК'});return
+                self.response(200,job); return
             self.response(404,{'error':'ТСД может только передать набор и получить его статус'}); return
         if path=='/api/state' and method=='GET':
             self.response(200,{'version':VERSION,'jobs':self.state.public_jobs(),
-                       'operations':self.state.operations,'dataDir':str(self.state.data_dir)}); return
+                       'operations':self.state.public_operations(),'selectionLimit':MAX_SELECTION,'dataDir':str(self.state.data_dir)}); return
         if path=='/api/connection' and method=='GET': self.response(200,self.state.connection()); return
         if path=='/api/pair.svg' and method=='GET':
             import qrcode
@@ -212,7 +252,7 @@ class Handler(BaseHTTPRequestHandler):
             body=self.read_json()
             if body.get('confirmed') is not True: raise ValidationError('Нужно подтверждение отмены')
             items=body.get('items')
-            if not isinstance(items,list) or not 1<=len(items)<=50: raise ValidationError('Выберите 1–50 заданий')
+            if not isinstance(items,list) or not 1<=len(items)<=MAX_SELECTION: raise ValidationError(f'Выберите 1–{MAX_SELECTION} заданий')
             with self.state.op_lock:
                 if any(x['state'] in ('QUEUED','RUNNING') for x in self.state.operations.values()):
                     raise ValidationError('Дождитесь завершения операции подписи/проверки')
@@ -241,14 +281,19 @@ def main():
     admin=Server(('127.0.0.1',settings['adminPort']),Handler)
     try: lan=Server(('0.0.0.0',settings['lanPort']),Handler)
     except Exception: admin.server_close(); raise
-    state=State(args.data_dir,settings,args.advertise)
+    try:
+        backup_path=backup_existing_queue(args.data_dir)
+        state=State(args.data_dir,settings,args.advertise)
+    except Exception:
+        admin.server_close();lan.server_close();raise
     for server,lane in ((admin,'admin'),(lan,'lan')): server.state=state; server.lane=lane
-    lan.socket=settings['sslContext'].wrap_socket(lan.socket,server_side=True)
+    lan.tls_context=settings['sslContext']
     for target in (admin.serve_forever,lan.serve_forever,state.poll): threading.Thread(target=target,daemon=True).start()
     link=f"http://127.0.0.1:{settings['adminPort']}/#"+state.admin_key
     print('\nЧЗ: Наборы '+VERSION+' — окно не закрывать во время работы.')
     print('Панель только на этом ПК:',link)
     print('Папка данных:',args.data_dir)
+    if backup_path: print('Проверенная копия очереди до запуска:',backup_path)
     print('ТСД: одна локальная сеть. Коды подключения находятся в панели.')
     print('Отправка в ЧЗ ТОЛЬКО после кнопки «Подписать и отправить» на ПК.')
     if not args.no_browser: webbrowser.open(link)

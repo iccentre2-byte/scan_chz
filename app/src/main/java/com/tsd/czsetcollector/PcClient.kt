@@ -1,22 +1,28 @@
 package com.tsd.czsetcollector
 
 import com.google.gson.Gson
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
 import java.net.URI
+import java.net.SocketTimeoutException
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.security.cert.CertificateException
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLException
 import javax.net.ssl.X509TrustManager
 
 /** Trust ONLY the exact certificate paired on the PC screen; not a trust-all manager. */
-class PcClient(private val config:PcConfig) {
+class PcClient internal constructor(private val config: PcConfig, private val transport: PcHttpTransport) {
+    constructor(config: PcConfig) : this(config, createTransport(config))
+
     companion object {
+        private val pcStates = setOf("WAITING_SIGNATURE", "SUBMITTING", "SUBMITTED", "PROCESSING", "VERIFIED",
+            "REJECTED", "UNKNOWN", "BLOCKED", "CHECK_REQUIRED", "CANCELLED_LOCAL")
         fun validate(c:PcConfig) {
             val u=URI(c.url)
             require(u.scheme=="https" && u.userInfo==null && u.query==null && u.fragment==null &&
@@ -29,44 +35,100 @@ class PcClient(private val config:PcConfig) {
         }
         private fun fingerprint(cert:X509Certificate)=MessageDigest.getInstance("SHA-256").digest(cert.encoded)
             .joinToString(""){"%02x".format(it.toInt() and 255)}
-    }
-    private val gson=Gson()
-    private val client:OkHttpClient
-    init {
-        validate(config)
-        val trust=object:X509TrustManager {
-            override fun getAcceptedIssuers():Array<X509Certificate> = emptyArray()
-            override fun checkClientTrusted(chain:Array<X509Certificate>,authType:String) {throw CertificateException("Not a server")}
-            override fun checkServerTrusted(chain:Array<X509Certificate>,authType:String) {
-                if(chain.isEmpty())throw CertificateException("No server certificate")
-                chain[0].checkValidity()
-                if(!fingerprint(chain[0]).equals(config.pin,true))throw CertificateException("Сертификат ПК изменился. Сверьте QR на ПК")
+
+        private fun createTransport(config: PcConfig): PcHttpTransport {
+            validate(config)
+            val trust=object:X509TrustManager {
+                override fun getAcceptedIssuers():Array<X509Certificate> = emptyArray()
+                override fun checkClientTrusted(chain:Array<X509Certificate>,authType:String) {throw CertificateException("Not a server")}
+                override fun checkServerTrusted(chain:Array<X509Certificate>,authType:String) {
+                    if(chain.isEmpty())throw CertificateException("No server certificate")
+                    chain[0].checkValidity()
+                    if(!fingerprint(chain[0]).equals(config.pin,true))throw CertificateException("Сертификат ПК изменился. Сверьте QR на ПК")
+                }
             }
-        }
-        val ssl=SSLContext.getInstance("TLS");ssl.init(null,arrayOf(trust),SecureRandom())
-        client=OkHttpClient.Builder().sslSocketFactory(ssl.socketFactory,trust)
-            .hostnameVerifier{host,session -> host==URI(config.url).host &&
-                try {fingerprint(session.peerCertificates[0] as X509Certificate).equals(config.pin,true)}catch(e:Exception){false}}
-            .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
-            .connectTimeout(10,TimeUnit.SECONDS).readTimeout(20,TimeUnit.SECONDS).writeTimeout(20,TimeUnit.SECONDS).build()
-    }
-    private fun call(path:String,body:String?=null):String {
-        val b=Request.Builder().url(config.url.trimEnd('/')+path).header("Authorization","Bearer "+config.key).header("Accept","application/json")
-        if(body==null)b.get() else b.post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
-        client.newCall(b.build()).execute().use {r ->
-            val bytes=r.body?.byteStream()?.use{stream ->
-                val out=java.io.ByteArrayOutputStream();val buffer=ByteArray(8192);var n=stream.read(buffer)
-                while(n>=0){out.write(buffer,0,n);require(out.size()<=2_000_000){"Слишком большой ответ ПК"};n=stream.read(buffer)};out.toByteArray()
-            }?:ByteArray(0)
-            val text=String(bytes,Charsets.UTF_8)
-            if(!r.isSuccessful){
-                val detail=try{gson.fromJson(text,com.google.gson.JsonObject::class.java).get("error")?.asString?:text}catch(e:Exception){text}
-                throw IllegalStateException("ПК HTTP ${r.code}: ${detail.take(600)}")
-            }
-            return text
+            val ssl=SSLContext.getInstance("TLS");ssl.init(null,arrayOf(trust),SecureRandom())
+            val client=OkHttpClient.Builder().sslSocketFactory(ssl.socketFactory,trust)
+                .hostnameVerifier{host,session -> host==URI(config.url).host &&
+                    try {fingerprint(session.peerCertificates[0] as X509Certificate).equals(config.pin,true)}catch(e:Exception){false}}
+                .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
+                .connectTimeout(10,TimeUnit.SECONDS).readTimeout(20,TimeUnit.SECONDS).writeTimeout(20,TimeUnit.SECONDS).build()
+            return PcHttpTransport(config.url, config.key, client)
         }
     }
-    fun ping(){call("/v1/ping")}
-    fun upload(job:Job):Job=gson.fromJson(call("/v1/jobs",gson.toJson(job)),Job::class.java)
-    fun status(id:String):Job {java.util.UUID.fromString(id);return gson.fromJson(call("/v1/jobs/$id"),Job::class.java)}
+
+    private val gson = Gson()
+    init { validate(config) }
+
+    fun ping() {
+        val raw = read { transport.get("/v1/ping") }
+        try {
+            val root = BackupJson.objectValue(BackupJson.parse(raw))
+            require(BackupJson.string(root, "version", 64).isNotBlank())
+            require(BackupJson.string(root, "signing", 200).isNotBlank())
+        } catch (error: Exception) { throw malformed(error) }
+    }
+
+    fun status(id: String): Job {
+        java.util.UUID.fromString(id)
+        return parseReply(read { transport.get("/v1/jobs/$id") }, id)
+    }
+
+    fun upload(job: Job): Job {
+        val raw = try { transport.post("/v1/jobs", gson.toJson(job)) }
+        catch (error: IOException) {
+            if (!PcHttpTransport.recoverable(error)) throw diagnostic(error)
+            // A lost POST response may follow a durable enqueue. Never resend; look up this UUID.
+            try { return matching(job, parseReply(transport.get("/v1/jobs/${job.id}"), job.id)) }
+            catch (lookup: Exception) {
+                throw IllegalStateException("Передача на ПК не подтверждена. Повторная передача не выполнялась. " +
+                    "${diagnostic(lookup).message} Очередь сохранена на ТСД.", lookup)
+            }
+        } catch (error: Exception) { throw diagnostic(error) }
+        return matching(job, parseReply(raw, job.id))
+    }
+
+    private fun matching(original: Job, reply: Job): Job {
+        require(reply.schemaVersion == original.schemaVersion && reply.id == original.id && reply.inn == original.inn &&
+            reply.environment == original.environment && reply.pg == original.pg && reply.template == original.template &&
+            reply.setCode == original.setCode && reply.children.size == original.children.size &&
+            reply.children.toSet() == original.children.toSet()) { "ПК вернул другой состав. Ответ не принят; очередь сохранена" }
+        return reply
+    }
+
+    private fun parseReply(raw: String, id: String): Job {
+        try {
+            val root = BackupJson.objectValue(BackupJson.parse(raw))
+            BackupJson.keys(root, setOf("schemaVersion", "id", "environment", "inn", "pg", "template", "setCode", "children", "status", "detail", "documentId"),
+                setOf("payloadHash", "updated", "uploaded"))
+            require(BackupJson.string(root, "id", 36) == id) { "Ответ для другого задания" }
+            require(BackupJson.string(root, "status", 64) in pcStates) { "Неизвестный статус ПК" }
+            root["payloadHash"]?.let { require(BackupJson.string(root, "payloadHash", 64).matches(Regex("[a-fA-F0-9]{64}"))) }
+            root["updated"]?.let { require(it.isJsonPrimitive && it.asJsonPrimitive.isNumber && it.asDouble.isFinite() && it.asDouble >= 0) }
+            root["uploaded"]?.let { BackupJson.boolean(it) }
+            root["documentId"].takeUnless { it.isJsonNull }?.let { require(BackupJson.string(root, "documentId", 512).isNotBlank()) }
+            if (BackupJson.string(root, "status") in setOf("SUBMITTED", "PROCESSING")) require(!root["documentId"].isJsonNull) { "Нет номера документа ЧЗ" }
+            root.remove("payloadHash"); root.remove("updated"); root.addProperty("uploaded", true)
+            val snapshot = JsonObject().apply { add("jobs", JsonArray().apply { add(root) }) }
+            return QueueBackup.parsePayload(gson.toJson(snapshot)).jobs.single()
+        } catch (error: Exception) { throw malformed(error) }
+    }
+
+    private fun malformed(error: Exception) = PcResponseException("Помощник ПК вернул неполный или некорректный ответ. " +
+        "Ответ не принят; обновите помощник ПК и проверьте подключение.", error)
+
+    private fun read(block: () -> String): String = try { block() } catch (error: Exception) { throw diagnostic(error) }
+
+    private fun diagnostic(error: Exception): Exception {
+        if (error is PcResponseException) return error
+        if (error is PcHttpException) return IllegalStateException(when (error.code) {
+            401, 403 -> "Помощник ПК отклонил ключ подключения. Покажите его QR на ПК и подключите ТСД заново."
+            404 -> "Помощник ПК не нашёл этот набор. Проверьте, что открыт прежний помощник и его очередь."
+            else -> "Помощник ПК: HTTP ${error.code}. ${error.detail}"
+        }, error)
+        if (error is SSLException) return IllegalStateException("Сертификат помощника ПК не подтверждён. Сверьте QR подключения на ПК; защита соединения сохранена.", error)
+        if (error is IOException) return IllegalStateException((if (error is SocketTimeoutException) "Помощник ПК не ответил вовремя. "
+            else "Соединение с помощником ПК прервалось. ") + "Оставьте помощник открытым, проверьте общую Wi-Fi сеть и адрес ПК. Очередь сохранена.", error)
+        return error
+    }
 }

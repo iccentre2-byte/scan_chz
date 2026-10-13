@@ -1,4 +1,4 @@
-param([string]$Destination)
+param([string]$Destination,[switch]$Maintenance)
 . (Join-Path $PSScriptRoot 'ToolCommon.ps1')
 $package='com.tsd.czsetcollector.safe'
 try {
@@ -21,7 +21,9 @@ try {
         $request=$null
     } else {
     $request=[guid]::NewGuid().ToString('D')
-    $r=Invoke-ChzNative $adb @('-s',$serial,'shell','am','start','-n',($package+'/com.tsd.czsetcollector.MainActivity'),'--ez','chz_export_backup','true','--es','chz_backup_request',$request)
+    $launchArgs=@('-s',$serial,'shell','am','start','-n',($package+'/com.tsd.czsetcollector.MainActivity'),'--ez','chz_export_backup','true','--es','chz_backup_request',$request)
+    if($Maintenance -and $identity.Code -ge 11){$launchArgs+=@('--ez','chz_maintenance','true')}
+    $r=Invoke-ChzNative $adb $launchArgs
     if($r.ExitCode -ne 0){throw 'Cannot open backup dialog'}
     Write-Host 'Confirm Save backup on the TSD. Waiting up to 60 seconds...'
     $remote='/sdcard/Android/data/'+$package+'/files/backup/'

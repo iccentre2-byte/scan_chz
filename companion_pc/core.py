@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import Any
 from urllib import request, error, parse
 
-VERSION = '1.3.0-rc1'
+VERSION = '1.3.3'
 HOSTS = {'production': 'https://markirovka.crpt.ru',
          'sandbox': 'https://markirovka.sandbox.crptech.ru'}
 MAX_BYTES = 2_000_000
+MAX_SELECTION = 500
 STATES = {'WAITING_SIGNATURE','SUBMITTING','SUBMITTED','PROCESSING',
           'VERIFIED','REJECTED','UNKNOWN','BLOCKED','CHECK_REQUIRED','CANCELLED_LOCAL'}
 STATUS_RU = {'WAITING_SIGNATURE':'Ожидает подписи на ПК', 'SUBMITTING':'Отправляется',
@@ -116,9 +117,28 @@ def validate_job(source: Any) -> dict:
 
 
 def product_bytes(job: dict) -> bytes:
-    j=validate_job(job)
-    return dumps({'participantId':j['inn'],'aggregationUnits':[
-        {'unitSerialNumber':j['setCode'],'sntins':j['children']}]}).encode('utf-8')
+    return batch_product_bytes([job])
+
+def validate_batch(jobs: list[dict]) -> list[dict]:
+    if not isinstance(jobs,list) or not 1<=len(jobs)<=MAX_SELECTION:
+        raise ValidationError(f'Выберите от 1 до {MAX_SELECTION} наборов')
+    clean=[validate_job(j) for j in jobs]
+    if len({(j['inn'],j['environment'],j['pg'],len(j['setCode'])) for j in clean})!=1:
+        raise ValidationError('Один документ: один ИНН, контур и товарная группа, совместимые коды наборов')
+    if len({j['id'] for j in clean})!=len(clean): raise ValidationError('Повтор задания в документе')
+    seen=set()
+    for j in clean:
+        codes=[j['setCode']]+j['children']
+        if seen.intersection(codes): raise ValidationError('Один код использован в нескольких наборах документа')
+        seen.update(codes)
+    return clean
+
+def batch_product_bytes(jobs: list[dict]) -> bytes:
+    clean=validate_batch(jobs)
+    content=dumps({'participantId':clean[0]['inn'],'aggregationUnits':[
+        {'unitSerialNumber':j['setCode'],'sntins':j['children']} for j in clean]}).encode('utf-8')
+    if len(content)>MAX_BYTES: raise ValidationError('Документ слишком большой; выберите меньше наборов')
+    return content
 
 
 def make_envelope(content: bytes, signature: str) -> dict:
@@ -186,6 +206,12 @@ class Store:
         with self.connect() as c: row=c.execute('SELECT * FROM jobs WHERE id=?',(ident,)).fetchone()
         if not row: raise KeyError('Задание не найдено')
         return self._view(row)
+    def get_many(self, idents) -> list[dict]:
+        if not idents or len(idents)>MAX_SELECTION: raise ValidationError('Неверный размер выбора')
+        with self.connect() as c:
+            rows={r['id']:r for r in c.execute('SELECT * FROM jobs WHERE id IN ('+','.join('?' for _ in idents)+')',idents)}
+        if any(i not in rows for i in idents): raise KeyError('Задание не найдено')
+        return [self._view(rows[i]) for i in idents]
     def all(self) -> list[dict]:
         with self.connect() as c:
             return [self._view(r) for r in c.execute('SELECT * FROM jobs ORDER BY updated DESC')]
@@ -214,6 +240,27 @@ class Store:
             c.execute('DELETE FROM reservations WHERE job_id=?',(ident,))
             c.execute('INSERT INTO events(job_id,time,state,detail) VALUES(?,?,?,?)',(ident,time.time(),'CANCELLED_LOCAL','Локальная отмена до отправки'))
         return self.get(ident)
+    def change_many(self, jobs, state, detail='', document_id=None, allowed=None):
+        """Commit every batch member before POST, or change none of them."""
+        if state not in STATES or not jobs: raise ValidationError('Неверное состояние или пустой документ')
+        if len({j['id'] for j in jobs})!=len(jobs): raise ValidationError('Повтор задания')
+        with self.lock,self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            rows=[]
+            for j in jobs:
+                row=c.execute('SELECT * FROM jobs WHERE id=?',(j['id'],)).fetchone()
+                if not row or row['digest']!=j['payloadHash']: raise ValidationError('Состав изменился; документ не отправлен')
+                if allowed is not None and row['state'] not in allowed:
+                    raise ValidationError('Действие запрещено в состоянии '+row['state'])
+                rows.append(row)
+            now=time.time();message=str(detail)[:16000]
+            for row in rows:
+                doc=document_id or row['document_id']
+                c.execute('UPDATE jobs SET state=?,detail=?,document_id=?,updated=? WHERE id=?',
+                    (state,message,doc,now,row['id']))
+                c.execute('INSERT INTO events(job_id,time,state,detail) VALUES(?,?,?,?)',
+                    (row['id'],now,state,message))
+        return self.get_many([j['id'] for j in jobs])
     def backup(self, destination: Path):
         with self.lock,self.connect() as src,closing(sqlite3.connect(destination)) as dest:
             src.backup(dest)
@@ -346,29 +393,73 @@ def document_status(raw: Any) -> tuple[str,str]:
 class Engine:
     def __init__(self,store: Store): self.store=store
     def submit(self, ident: str, api: TrueApi, signer):
-        j=self.store.get(ident)
-        if j['status'] not in {'WAITING_SIGNATURE','BLOCKED'}:
+        return self.submit_many([ident],api,signer)[0]
+    def submit_many(self, idents: list[str], api: TrueApi, signer):
+        jobs=self.store.get_many(idents)
+        validate_batch(jobs)
+        if any(j['status'] not in {'WAITING_SIGNATURE','BLOCKED'} or j['documentId'] for j in jobs):
             raise ValidationError('Повторная отправка запрещена. Сначала проверка существующего документа')
         try:
-            preflight(j,api.codes([j['setCode']]+j['children']))
-            content=product_bytes(j)
+            info=api.codes([code for j in jobs for code in [j['setCode']]+j['children']])
+            for j in jobs: preflight(j,info)
+            content=batch_product_bytes(jobs)
             signature=signer.sign(content,detached=True)
             envelope=make_envelope(content,signature)
+            if len(dumps(envelope).encode('utf-8'))>MAX_BYTES:
+                raise ValidationError('Подписанный документ слишком большой; выберите меньше наборов')
         except Exception as e:
-            self.store.change(ident,'BLOCKED',str(e),allowed={'WAITING_SIGNATURE','BLOCKED'})
+            self.store.change_many(jobs,'BLOCKED',str(e),allowed={'WAITING_SIGNATURE','BLOCKED'})
             raise
         # Persist BEFORE starting POST. Never auto-retry this operation.
-        self.store.change(ident,'SUBMITTING','Подписан. Начата отправка.',allowed={'WAITING_SIGNATURE','BLOCKED'})
+        self.store.change_many(jobs,'SUBMITTING',f'Подписан общий документ: {len(jobs)} наборов. Начата отправка.',allowed={'WAITING_SIGNATURE','BLOCKED'})
         try:
             result=api.call('POST','/lk/documents/create?pg=grocery',envelope)
             if isinstance(result,dict):
                 result=result.get('value') or result.get('document_id') or result.get('documentId')
             doc_id=str(uuid.UUID(str(result)))
         except Exception as e:
-            self.store.change(ident,'UNKNOWN',str(e)+'\nАвтоповтор запрещён. Проверьте набор/документы ЧЗ.')
+            self.store.change_many(jobs,'UNKNOWN',str(e)+'\nАвтоповтор всего документа запрещён. Проверьте наборы/документы ЧЗ.',allowed={'SUBMITTING'})
             raise
-        self.store.change(ident,'SUBMITTED','ЧЗ принял запрос. Результат ещё не подтверждён.',doc_id)
-        return self.refresh(ident,api)
+        self.store.change_many(jobs,'SUBMITTED',f'ЧЗ принял общий документ: {len(jobs)} наборов. Результат ещё не подтверждён.',doc_id,allowed={'SUBMITTING'})
+        return self.refresh_many(idents,api)
+    def refresh_many(self, idents, api):
+        jobs=self.store.get_many(idents)
+        validate_batch(jobs)
+        groups=collections.defaultdict(list)
+        for j in jobs:
+            if j['status'] not in {'WAITING_SIGNATURE','BLOCKED','CANCELLED_LOCAL','VERIFIED'}:
+                groups[j['documentId']].append(j)
+        for doc,group in groups.items():
+            if not doc:
+                try: info=api.codes([j['setCode'] for j in group])
+                except ApiError as e:
+                    self.store.change_many(group,'UNKNOWN',str(e)+'\nНе отправляйте повторно. Проверьте ЛК ЧЗ.')
+                    continue
+                for j in group:
+                    try: verify_set(j,info)
+                    except (ValidationError,ApiError) as e:
+                        self.store.change(j['id'],'UNKNOWN',str(e)+'\nНе отправляйте повторно. Проверьте ЛК ЧЗ.')
+                    else:
+                        self.store.change(j['id'],'VERIFIED','Восстановлено по ЧЗ: владелец, статус и полный состав совпали. ID документа не восстановлен.')
+                continue
+            status,detail=document_status(api.document_info(doc))
+            if status=='CHECKED_OK':
+                try: info=api.codes([j['setCode'] for j in group])
+                except ApiError as e:
+                    self.store.change_many(group,'CHECK_REQUIRED','Документ обработан, но '+str(e));continue
+                for j in group:
+                    try: verify_set(j,info)
+                    except (ValidationError,ApiError) as e:
+                        self.store.change(j['id'],'CHECK_REQUIRED','Документ обработан, но '+str(e))
+                    else:
+                        self.store.change(j['id'],'VERIFIED','Документ обработан, владелец и полный состав проверены.')
+            elif status in {'CHECKED_NOT_OK','PARSE_ERROR','PROCESSING_ERROR','CANCELLED'}:
+                self.store.change_many(group,'REJECTED',status+': '+detail)
+            elif status=='UNRECOGNIZED':
+                self.store.change_many(group,'CHECK_REQUIRED','Неизвестный формат статуса документа: '+detail)
+            else:
+                self.store.change_many(group,'PROCESSING',status+': '+detail)
+        return self.store.get_many(idents)
     def refresh(self,ident: str,api: TrueApi):
         j=self.store.get(ident)
         if j['status'] in {'WAITING_SIGNATURE','BLOCKED','CANCELLED_LOCAL','VERIFIED'}: return j
