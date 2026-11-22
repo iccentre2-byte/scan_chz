@@ -63,6 +63,27 @@ class MainActivity:AppCompatActivity() {
     private var historyOptions=emptyList<SessionOption>()
     private var keyboardSuppressed=false
     private var activeToast:Toast?=null
+    private val receiveBluetoothFile=registerForActivityResult(ActivityResultContracts.OpenDocument()){uri->
+        if(uri!=null)attempt{
+            check(canReceiveBluetoothFile()){"Сначала завершите рабочую сессию и закройте редактор"}
+            val transfer=BluetoothTransfers.decode(readBackup(uri))
+            BluetoothTransfers.receive(snapshot,transfer,System.currentTimeMillis())
+            val job=transfer.job
+            val message=if(job==null)"Будет добавлен профиль «${transfer.profile.title}»."
+                else "Будут добавлены профиль «${transfer.profile.title}» и готовый набор из ${job.children.size} пачек. Для подписи отправьте его с одного ТСД."
+            guardDialog().setTitle("Принять с другого ТСД?").setMessage(message)
+                .setNegativeButton("Отмена",null).setPositiveButton("Принять"){_,_->attempt{
+                    check(canReceiveBluetoothFile()){"Сначала завершите рабочую сессию и закройте редактор"}
+                    val next=BluetoothTransfers.receive(snapshot,transfer,System.currentTimeMillis())
+                    val profileFile=ProfileBackup.encode(ProfileData(listOf(transfer.profile),0))
+                    val merged=profileStore.repository.importBackup(profileFile)
+                    if(next!==snapshot && persist(next))snapshot=next
+                    profiles.clear();profiles.addAll(merged.data.profiles);selected=merged.data.selectedIndex
+                    profileSpinner();render()
+                    if(!halted)toast(if(job==null)"Профиль принят" else "Набор принят и сохранён в очереди ТСД")
+                }}.show()
+        }
+    }
     private val importProfiles=registerForActivityResult(ActivityResultContracts.OpenDocument()){uri->
         if(uri!=null)attempt{
             check(work.profile==null && !halted){"Сначала выйдите к выбору профиля"}
@@ -128,7 +149,7 @@ class MainActivity:AppCompatActivity() {
         super.onCreate(savedInstanceState);b=ActivityMainBinding.inflate(layoutInflater);setContentView(b.root)
         maintenance=intent?.getBooleanExtra("chz_maintenance",false)==true
         prefs=getSharedPreferences("cz_multi_profiles",Context.MODE_PRIVATE);store=QueueStore(filesDir);profileStore=ProfileStore(prefs,filesDir)
-        scanFeedback=ScanFeedback(this,prefs.getBoolean("scan_sound",true),prefs.getBoolean("scan_voice",true))
+        scanFeedback=ScanFeedback(this,prefs.getBoolean("scan_sound",true),prefs.getBoolean("scan_voice",true),savedScanVoice())
         b.tvLog.movementMethod=ScrollingMovementMethod()
         b.tvAppVersion.text="${BuildConfig.VERSION_NAME} · Профиль → Сборка · Поток"
         try {snapshot=store.load()} catch(e:Exception){storageFailure(e)}
@@ -283,6 +304,9 @@ class MainActivity:AppCompatActivity() {
         }}
         b.btnImportProfiles.setOnClickListener{pauseFlow();importProfiles.launch(arrayOf("*/*"))}
         b.btnImportQueue.setOnClickListener{pauseFlow();importQueue.launch(arrayOf("*/*"))}
+        b.btnShareProfileToTsd.setOnClickListener{profiles.getOrNull(selected)?.let(::showBluetoothShare)}
+        b.btnShareSetToTsd.setOnClickListener{work.profile?.let(::showBluetoothShare)}
+        b.btnReceiveFromTsd.setOnClickListener{if(canReceiveBluetoothFile())receiveBluetoothFile.launch(arrayOf("*/*"))}
         b.btnConnectPc.setOnClickListener{connectDialog()}
         b.btnSendDraft.setOnClickListener{pauseFlow();sync(true,true)}
         b.btnRefresh.setOnClickListener{pauseFlow();sync(false,true)}
@@ -385,10 +409,9 @@ class MainActivity:AppCompatActivity() {
             val result=CollectionScan.accept(snapshot,profile,code){next->persist(next)}
             if(result==null){showScanResult("Код не принят: ошибка сохранения.",true);return}
             snapshot=result.snapshot
-            mainHandler.removeCallbacks(endDuplicateFlash)
-            workScreen.clearFlash()
             if(result.signal==ScanSignal.COMPLETED)workScreen.savedCompletion(snapshot)
             if(result.signal==ScanSignal.DUPLICATE){
+                mainHandler.removeCallbacks(endDuplicateFlash)
                 workScreen.duplicate(SystemClock.elapsedRealtime())
                 mainHandler.postDelayed(endDuplicateFlash,WorkScreenFeedback.FLASH_MS)
             }
@@ -416,16 +439,68 @@ class MainActivity:AppCompatActivity() {
         return true
     }
     private fun showScanResult(message:String,error:Boolean=false,signal:ScanSignal?=null){scanResult=message;scanResultError=error;lastScanSignal=signal;render()}
+    private fun savedScanVoice() = if(prefs.getString("scan_voice_type",null)==ScanVoice.FEMALE.name) ScanVoice.FEMALE else ScanVoice.ORIGINAL
+
+    private fun canReceiveBluetoothFile() = work.profile==null && !halted && !maintenance && !editorOpen && !networkBusy
+
+    private fun showBluetoothShare(profile:OrganizationProfile){
+        if(halted || maintenance || editorOpen || networkBusy)return
+        val eligible=snapshot.jobs.filter{BluetoothTransfers.canShare(it) && WorkSession.matches(profile,it)}.asReversed()
+        val labels=listOf("Только профиль")+eligible.map{
+            "Набор …${it.setCode.takeLast(8)} · ${it.children.size} пачек"
+        }
+        var selectedItem=0
+        guardDialog().setTitle("Передать копию на другой ТСД")
+            .setSingleChoiceItems(labels.toTypedArray(),0){_,position->selectedItem=position}
+            .setNegativeButton("Отмена",null)
+            .setPositiveButton("Выбрать Bluetooth"){_,_->attempt{
+                val job=if(selectedItem==0)null else {
+                    snapshot.jobs.firstOrNull{it.id==eligible[selectedItem-1].id && BluetoothTransfers.canShare(it)}
+                        ?: error("Набор уже передан помощнику. Выберите другой.")
+                }
+                val file=File(getExternalFilesDir(null),"CHZ-transfer-${job?.id ?: java.util.UUID.randomUUID()}.txt")
+                file.writeText(BluetoothTransfers.encode(BluetoothTransfer(profile,job)),Charsets.UTF_8)
+                share(file,"text/plain")
+            }}.show()
+    }
+
     private fun feedbackSettings(){
         val layout=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(24,12,24,12)}
         val sound=CheckBox(this).apply{text="Короткие звуковые сигналы";isChecked=prefs.getBoolean("scan_sound",true)}
-        val voice=CheckBox(this).apply{text="Женский голос при сканировании и в предупреждениях";isChecked=prefs.getBoolean("scan_voice",true)}
-        val note=TextView(this).apply{text="Громкость — мультимедиа ТСД. «Набор собран» означает сохранение на ТСД. Подпись и отправка в ЧЗ выполняются на ПК.";setPadding(0,12,0,12)}
-        listOf(sound,voice,note).forEach{layout.addView(it)}
-        guardDialog().setTitle("Звук и голос").setView(layout).setNegativeButton("Отмена",null)
+        val voice=CheckBox(this).apply{text="Голос при сканировании и в предупреждениях";isChecked=prefs.getBoolean("scan_voice",true)}
+        val male=RadioButton(this).apply{id=View.generateViewId();text="Мужской (прежний)"}
+        val female=RadioButton(this).apply{id=View.generateViewId();text="Женский"}
+        val choices=RadioGroup(this).apply{
+            orientation=RadioGroup.VERTICAL
+            addView(male)
+            addView(female)
+            check(if(savedScanVoice()==ScanVoice.FEMALE)female.id else male.id)
+        }
+        fun selected() = if(choices.checkedRadioButtonId==female.id)ScanVoice.FEMALE else ScanVoice.ORIGINAL
+        val note=TextView(this).apply{setPadding(0,12,0,12)}
+        fun showVoiceStatus(){
+            note.text="${scanFeedback?.status(selected()).orEmpty()}\nГромкость — мультимедиа ТСД."
+        }
+        val preview=Button(this).apply{
+            text="Прослушать голос"
+            setOnClickListener{
+                showVoiceStatus()
+                if(scanFeedback?.preview(selected())!=true)toast(scanFeedback?.status(selected()).orEmpty())
+            }
+        }
+        choices.setOnCheckedChangeListener{_,_->showVoiceStatus()}
+        showVoiceStatus()
+        listOf(sound,voice,choices,preview,note).forEach{layout.addView(it)}
+        guardDialog(onDismiss={scanFeedback?.stopSpeech()}).setTitle("Звук и голос").setView(layout).setNegativeButton("Отмена",null)
             .setPositiveButton("Сохранить"){_,_->attempt{
-                check(prefs.edit().putBoolean("scan_sound",sound.isChecked).putBoolean("scan_voice",voice.isChecked).commit()){"Не удалось сохранить настройки сигналов"}
-                scanFeedback?.configure(sound.isChecked,voice.isChecked)
+                val voiceType=selected()
+                if(voiceType==ScanVoice.FEMALE && voice.isChecked && scanFeedback?.available(voiceType)!=true){
+                    toast(scanFeedback?.status(voiceType).orEmpty())
+                    return@attempt
+                }
+                check(prefs.edit().putBoolean("scan_sound",sound.isChecked).putBoolean("scan_voice",voice.isChecked)
+                    .putString("scan_voice_type",voiceType.name).commit()){"Не удалось сохранить настройки сигналов"}
+                scanFeedback?.configure(sound.isChecked,voice.isChecked,voiceType)
             }}.show()
     }
     private fun renderQueueViews(){
@@ -532,19 +607,29 @@ class MainActivity:AppCompatActivity() {
         val night=(resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK)==Configuration.UI_MODE_NIGHT_YES
         val colors=workScreen.colors(screenState,night)
         b.root.setBackgroundColor(colors.background);b.workPage.setBackgroundColor(colors.background)
+        b.tvAppVersion.setTextColor(colors.foreground)
         listOf(b.tvWorkProfile,b.tvWorkSession,b.tvScanState,b.tvFlowState,b.tvScanHeader,b.tvCurrentSet,b.tvProgress,
             b.tvQueueHeader,b.tvQueueSelection,b.tvTotalCompletedSets,b.tvNoSignature,b.tvQueue,b.tvLog).forEach{it.setTextColor(colors.foreground)}
         b.profilePage.visibility=if(p==null)View.VISIBLE else View.GONE
         b.workPage.visibility=if(p!=null)View.VISIBLE else View.GONE
         b.tvScanResult.visibility=if(p!=null)View.VISIBLE else View.GONE
-        b.tvScanResult.text=if(halted)"Сканирование остановлено: ошибка сохранения." else if(p!=null&&!sessionReady)"Нажмите «Начать новую сессию»." else scanResult.ifBlank{
+        b.tvLargeProgress.visibility=if(p!=null && j!=null)View.VISIBLE else View.GONE
+        b.tvLargeProgress.setTextColor(colors.foreground)
+        if(j!=null){
+            val collected=j.children.size
+            val expected=j.template.expected.values.sum()
+            b.tvLargeProgress.text="$collected/$expected"
+            b.tvLargeProgress.contentDescription="Добавлено пачек: $collected из $expected"
+        }
+        b.tvScanResult.text=if(halted)"Сканирование остановлено: ошибка сохранения." else if(p!=null&&!sessionReady)"Нажмите «Начать новую сессию»." else if(screenState==WorkScreenState.DUPLICATE && lastScanSignal!=ScanSignal.DUPLICATE)"Дубль: код уже учтён." else scanResult.ifBlank{
             if(j!=null)"Набор открыт. Продолжайте сканировать пачки."
             else if(workScreen.savedState(snapshot)==WorkScreenState.COMPLETE)"Набор собран и сохранён на ТСД. Можно сканировать следующий."
             else "Готово к сканированию набора."
         }
-        b.tvScanResult.setTextColor(colors.foreground)
-        b.tvScanResult.setBackgroundColor(if(halted || scanResultError&&lastScanSignal!=ScanSignal.DUPLICATE)
-            workScreen.colors(WorkScreenState.DUPLICATE,night).background else colors.background)
+        val resultColors=if(halted || scanResultError&&lastScanSignal!=ScanSignal.DUPLICATE)
+            workScreen.colors(WorkScreenState.DUPLICATE,night) else colors
+        b.tvScanResult.setTextColor(resultColors.foreground)
+        b.tvScanResult.setBackgroundColor(resultColors.background)
         b.profileEditor.visibility=if(editorOpen)View.VISIBLE else View.GONE
         b.btnEditProfile.text=if(editorOpen)"Закрыть настройки без сохранения" else "Настроить профиль"
         b.btnStartWork.text=if(editorOpen)"Сохранить и начать работу" else "Начать работу"
@@ -558,6 +643,9 @@ class MainActivity:AppCompatActivity() {
         b.btnExportProfiles.isEnabled=!halted
         b.btnImportProfiles.isEnabled=p==null&&!halted&&!editorOpen
         b.btnImportQueue.isEnabled=p==null&&!halted&&!editorOpen&&SessionAccounting.emptyForImport(snapshot)
+        b.btnShareProfileToTsd.isEnabled=p==null&&!halted&&!maintenance&&!editorOpen&&!networkBusy
+        b.btnShareSetToTsd.isEnabled=p!=null&&!halted&&!maintenance&&!networkBusy
+        b.btnReceiveFromTsd.isEnabled=canReceiveBluetoothFile()
         val chosen=profiles.getOrNull(selected)
         b.tvProfileSummary.text=chosen?.let{"${it.title}\nИНН: ${it.inn.ifBlank{"не заполнен"}}\n${if(it.environment=="sandbox")"ТЕСТОВЫЙ контур" else "РЕАЛЬНЫЙ ЧЗ"}\nGTIN набора: ${it.template.setGtin.ifBlank{"не заполнен"}} · ${it.template.expected.values.sum()} шт"}?:"Выберите профиль"
         b.tvWorkProfile.text=p?.let{"${it.title}\nИНН ${it.inn} · ${if(it.environment=="sandbox")"ТЕСТОВЫЙ контур" else "РЕАЛЬНЫЙ ЧЗ"}\nПрофиль зафиксирован до выхода из сборки"}?:""
