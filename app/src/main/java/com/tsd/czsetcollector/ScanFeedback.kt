@@ -2,81 +2,75 @@ package com.tsd.czsetcollector
 
 import android.content.Context
 import android.media.AudioManager
+import android.media.MediaPlayer
 import android.media.ToneGenerator
-import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.speech.tts.TextToSpeech
-import java.util.Locale
 
-/** Optional audio is isolated from scanning/storage. Only resumed activities own audio resources. */
-class ScanFeedback(context:Context,sound:Boolean,voice:Boolean) {
-    private val appContext=context.applicationContext
-    private val handler=Handler(Looper.getMainLooper())
-    private var soundEnabled=sound
-    private var voiceEnabled=voice
-    private var active=false
-    private var generation=0
-    private var tones:ToneGenerator?=null
-    private var speech:TextToSpeech?=null
-    private var russianReady=false
-    var voiceStatus="Голос ещё не проверен."
-        private set
+class ScanFeedback(context: Context, private var soundEnabled: Boolean, private var voiceEnabled: Boolean) {
+    private val appContext = context.applicationContext
+    private var active = false
+    private var tones: ToneGenerator? = null
+    private var speech: MediaPlayer? = null
 
-    fun configure(sound:Boolean,voice:Boolean) {
-        if(sound==soundEnabled && voice==voiceEnabled)return
-        val wasActive=active;pause();soundEnabled=sound;voiceEnabled=voice
-        if(wasActive)resume()
+    fun configure(sound: Boolean, voice: Boolean) {
+        if (sound == soundEnabled && voice == voiceEnabled) return
+        val wasActive = active
+        pause()
+        soundEnabled = sound
+        voiceEnabled = voice
+        if (wasActive) resume()
     }
+
     fun resume() {
-        if(active)return
-        active=true
-        if(soundEnabled)tones=runCatching{ToneGenerator(AudioManager.STREAM_MUSIC,55)}.getOrNull()
-        voiceStatus=if(voiceEnabled)"Проверяется русский голос. Сканирование доступно." else "Голос отключён."
-        if(!voiceEnabled)return
-        val requested=++generation
+        if (active) return
+        active = true
+        if (soundEnabled) tones = runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 55) }.getOrNull()
+    }
+
+    fun play(signal: ScanSignal) {
+        when (signal) {
+            ScanSignal.OPENED -> play(ToneGenerator.TONE_PROP_BEEP, 90, R.raw.voice_set_opened)
+            ScanSignal.COMPLETED -> play(ToneGenerator.TONE_PROP_ACK, 350, R.raw.voice_set_completed)
+            ScanSignal.DUPLICATE -> play(ToneGenerator.TONE_PROP_NACK, 160, R.raw.voice_duplicate)
+        }
+    }
+
+    fun warnBeforeReset() = play(ToneGenerator.TONE_PROP_BEEP2, 350, R.raw.voice_reset_warning)
+
+    fun warnBeforeProfileDeletion() = play(ToneGenerator.TONE_PROP_BEEP2, 350, R.raw.voice_delete_profile_warning)
+
+    private fun play(tone: Int, durationMs: Int, voiceResource: Int) {
+        if (!active) return
+        if (soundEnabled) runCatching { tones?.startTone(tone, durationMs) }
+        stopSpeech()
+        if (!voiceEnabled) return
         try {
-            speech=TextToSpeech(appContext){status->handler.post{
-                if(!active || generation!=requested)return@post
-                val engine=speech ?: return@post
-                russianReady=runCatching {
-                    if(status!=TextToSpeech.SUCCESS)return@runCatching false
-                    val russian=Locale("ru","RU")
-                    if(engine.setLanguage(russian)<TextToSpeech.LANG_AVAILABLE)return@runCatching false
-                    val installed=engine.voices?.firstOrNull{it.locale.language=="ru" && !it.isNetworkConnectionRequired && TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED !in it.features}
-                    if(installed!=null && engine.setVoice(installed)!=TextToSpeech.SUCCESS)return@runCatching false
-                    val chosen=engine.voice ?: return@runCatching false
-                    if(chosen.locale.language!="ru" || chosen.isNetworkConnectionRequired || TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED in chosen.features)return@runCatching false
-                    engine.setSpeechRate(1.05f)==TextToSpeech.SUCCESS
-                }.getOrDefault(false)
-                voiceStatus=if(russianReady)"Русский голос готов." else "Русский голос не установлен или недоступен. Сканирование доступно. Короткие сигналы можно включить отдельно."
-            }}
-        } catch(e:Exception) {
-            russianReady=false;voiceStatus="Голосовой движок недоступен. Сканирование доступно. Короткие сигналы можно включить отдельно."
+            val player = MediaPlayer.create(appContext, voiceResource) ?: return
+            speech = player
+            player.apply {
+                setVolume(0.8f, 0.8f)
+                setOnCompletionListener { player -> if (speech === player) stopSpeech() }
+                setOnErrorListener { player, _, _ ->
+                    if (speech === player) stopSpeech()
+                    true
+                }
+            }
+            player.start()
+        } catch (_: RuntimeException) {
+            stopSpeech()
         }
     }
-    fun play(signal:ScanSignal) {
-        if(!active)return
-        if(soundEnabled)runCatching {
-            val tone=when(signal){
-                ScanSignal.OPENED->ToneGenerator.TONE_PROP_BEEP
-                ScanSignal.COMPLETED->ToneGenerator.TONE_PROP_ACK
-                ScanSignal.DUPLICATE->ToneGenerator.TONE_PROP_NACK
-            }
-            tones?.startTone(tone,when(signal){ScanSignal.OPENED->90;ScanSignal.COMPLETED->350;ScanSignal.DUPLICATE->160})
-        }
-        if(voiceEnabled && russianReady)runCatching {
-            // Replace stale speech instead of letting a fast scan stream build an announcement backlog.
-            val options=Bundle().apply{putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME,0.8f)}
-            if(speech?.speak(signal.spoken,TextToSpeech.QUEUE_FLUSH,options,"scan-${signal.name}")!=TextToSpeech.SUCCESS) {
-                russianReady=false;voiceStatus="Русский голос недоступен. Сканирование доступно. Короткие сигналы можно включить отдельно."
-            }
-        }
+
+    fun stopSpeech() {
+        val player = speech
+        speech = null
+        runCatching { player?.release() }
     }
+
     fun pause() {
-        active=false;generation++;russianReady=false
-        handler.removeCallbacksAndMessages(null)
-        runCatching{speech?.stop()};runCatching{speech?.shutdown()};speech=null
-        runCatching{tones?.stopTone()};runCatching{tones?.release()};tones=null
+        active = false
+        stopSpeech()
+        runCatching { tones?.stopTone() }
+        runCatching { tones?.release() }
+        tones = null
     }
 }

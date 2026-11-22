@@ -115,6 +115,8 @@ class State:
                 raise ValidationError('Дождитесь завершения предыдущей операции')
             self.operations[ident]={'state':'QUEUED','action':action,'total':len(snapshot),'done':0,'error':'',
                                     'stage':'login','startedAt':time.time()}
+            if action=='submit':
+                self.operations[ident]['_jobIds']=tuple(job['id'] for job in snapshot)
         try:self.worker.submit(self._run,ident,action,snapshot,signer)
         except Exception:
             with self.op_lock:self.operations[ident].update(state='ERROR',error='Не удалось запустить операцию. Откройте помощник заново.')
@@ -158,8 +160,15 @@ class State:
                 ids=[j['id'] for j in jobs]
                 with self.op_lock:op['stage']='submit' if action=='submit' else 'check'
                 if action=='submit':
-                    result=self.engine.submit_many(ids,api,signer)
-                    with self.op_lock:op['done']=len(result)
+                    document_id=self.engine.submit_document(ids,api,signer)
+                    with self.op_lock:op.update(documentId=document_id,done=len(ids),stage='check')
+                    try:
+                        self.engine.refresh_many(ids,api)
+                    except Exception as error:
+                        self.sync_failure(group,error,api)
+                        with self.op_lock:
+                            op.update(state='DONE',verificationError=self.safe_error(error,api),finishedAt=time.time())
+                        return
                 else:
                     for start in range(0,len(ids),MAX_SELECTION):
                         self.record_sync(group,lastAttempt=time.time())
@@ -211,8 +220,17 @@ class State:
         return result
     def public_jobs(self):
         return [dict(j,statusRu=STATUS_RU.get(j['status'],j['status'])) for j in self.store.all()]
-    def public_operations(self):
-        with self.op_lock: return {k:dict(v) for k,v in self.operations.items()}
+    def public_operations(self,jobs=None):
+        with self.op_lock: operations={k:dict(v) for k,v in self.operations.items()}
+        by_id={j['id']:j for j in (self.store.all() if jobs is None else jobs)}
+        for op in operations.values():
+            ids=op.pop('_jobIds',())
+            if 'documentId' in op:
+                statuses=[by_id.get(ident,{}).get('status') for ident in ids]
+                op['verified']=statuses.count('VERIFIED')
+                op['rejected']=statuses.count('REJECTED')
+                op['pending']=op['total']-op['verified']-op['rejected']
+        return operations
 
 class Server(ThreadingHTTPServer):
     daemon_threads=True
@@ -308,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/api/state' and method=='GET':
             jobs=self.state.public_jobs()
             self.response(200,{'version':VERSION,'jobs':jobs,'syncGroups':self.state.public_sync(jobs),
-                       'operations':self.state.public_operations(),'selectionLimit':MAX_SELECTION,'dataDir':str(self.state.data_dir)}); return
+                       'operations':self.state.public_operations(jobs),'selectionLimit':MAX_SELECTION,'dataDir':str(self.state.data_dir)}); return
         if path=='/api/connection' and method=='GET': self.response(200,self.state.connection()); return
         if path=='/api/pair.svg' and method=='GET':
             import qrcode

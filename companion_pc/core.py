@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib import request, error, parse
 
-VERSION = '1.3.4'
+VERSION = '1.3.5'
 HOSTS = {'production': 'https://markirovka.crpt.ru',
          'sandbox': 'https://markirovka.sandbox.crptech.ru'}
 MAX_BYTES = 2_000_000
@@ -395,6 +395,10 @@ class Engine:
     def submit(self, ident: str, api: TrueApi, signer):
         return self.submit_many([ident],api,signer)[0]
     def submit_many(self, idents: list[str], api: TrueApi, signer):
+        self.submit_document(idents,api,signer)
+        return self.refresh_many(idents,api)
+    def submit_document(self, idents: list[str], api: TrueApi, signer):
+        """Return after the document ID is saved. Checking its result is a separate operation."""
         jobs=self.store.get_many(idents)
         validate_batch(jobs)
         if any(j['status'] not in {'WAITING_SIGNATURE','BLOCKED'} or j['documentId'] for j in jobs):
@@ -421,7 +425,7 @@ class Engine:
             self.store.change_many(jobs,'UNKNOWN',str(e)+'\nАвтоповтор всего документа запрещён. Проверьте наборы/документы ЧЗ.',allowed={'SUBMITTING'})
             raise
         self.store.change_many(jobs,'SUBMITTED',f'ЧЗ принял общий документ: {len(jobs)} наборов. Результат ещё не подтверждён.',doc_id,allowed={'SUBMITTING'})
-        return self.refresh_many(idents,api)
+        return doc_id
     def refresh_many(self, idents, api):
         jobs=self.store.get_many(idents)
         validate_batch(jobs)
