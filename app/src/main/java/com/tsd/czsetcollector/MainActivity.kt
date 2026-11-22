@@ -40,6 +40,7 @@ class MainActivity:AppCompatActivity() {
     private var selected=0
     private var halted=false
     private var networkBusy=false
+    private val statusReads=StatusReadRotation()
     private var maintenance=false
     private var pairMode=false
     private var pc=PcConfig()
@@ -178,6 +179,7 @@ class MainActivity:AppCompatActivity() {
         b.btnResumeAfterUpdate.setOnClickListener{maintenance=false;render()}
         b.btnFeedbackSettings.setOnClickListener{feedbackSettings()}
         b.btnViewQueue.setOnClickListener{showQueueViewer()}
+        b.btnRefreshFromProfiles.setOnClickListener{sync(false,true)}
         b.btnBeginSession.setOnClickListener{attempt{
             check(!maintenance && !halted){"Сначала завершите проверку обновления"}
             val p=checkNotNull(work.profile){"Сначала выберите рабочий профиль"}
@@ -253,7 +255,7 @@ class MainActivity:AppCompatActivity() {
             if(profiles.size<=1){toast("Единственный профиль не удаляется");return@setOnClickListener}
             val at=selected
             val target=profiles.getOrNull(at) ?: return@setOnClickListener
-            guardDialog().setTitle("Удалить профиль «${target.title}»?")
+            guardDialog(onDismiss={scanFeedback?.stopSpeech()}).setTitle("Удалить профиль «${target.title}»?")
                 .setMessage("Будет удалён только профиль «${target.title}» и его шаблон.\nОчередь не удаляется: собранные наборы останутся со своим ИНН и составом.")
                 .setNegativeButton("Отмена",null).setPositiveButton("Удалить"){_,_->
                     attempt{
@@ -264,6 +266,7 @@ class MainActivity:AppCompatActivity() {
                         profiles.clear();profiles.addAll(next);selected=0;profileSpinner();closeProfileEditor()
                     }
                 }.show()
+            scanFeedback?.warnBeforeProfileDeletion()
         }
         b.btnExportProfiles.setOnClickListener{attempt{
             pauseFlow()
@@ -280,12 +283,13 @@ class MainActivity:AppCompatActivity() {
         b.btnRefresh.setOnClickListener{pauseFlow();sync(false,true)}
         b.btnResetCurrentSet.setOnClickListener{
             val j=snapshot.current?:return@setOnClickListener
-            guardDialog().setTitle("Сбросить незавершённый набор?")
-                .setMessage("Пачек: ${j.children.size}. Этот набор ещё не передавался на ПК. Готовые наборы не будут удалены.")
-                .setNegativeButton("Отмена",null).setPositiveButton("Сбросить"){_,_->
+            guardDialog(onDismiss={scanFeedback?.stopSpeech()}).setTitle("Сбросить текущий набор?")
+                .setMessage("Сканирование этого набора придётся начать заново. Будет удалён код набора и все его отсканированные пачки (${j.children.size}).")
+                .setNegativeButton("Продолжить сборку",null).setPositiveButton("Сбросить набор"){_,_->
                     val next=SessionAccounting.discardCurrent(snapshot)
                     if(persist(next)){snapshot=next;pauseFlow();clearScanInput();showScanResult("Незавершённый набор сброшен. Готово к следующему набору.")}
                 }.show()
+            scanFeedback?.warnBeforeReset()
         }
         b.btnShareLog.setOnClickListener{share(logFile,"text/plain")}
         b.btnBackup.setOnClickListener{
@@ -402,8 +406,8 @@ class MainActivity:AppCompatActivity() {
     private fun feedbackSettings(){
         val layout=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(24,12,24,12)}
         val sound=CheckBox(this).apply{text="Короткие звуковые сигналы";isChecked=prefs.getBoolean("scan_sound",true)}
-        val voice=CheckBox(this).apply{text="Голос: набор открыт, набор собран, дубль";isChecked=prefs.getBoolean("scan_voice",true)}
-        val note=TextView(this).apply{text="${scanFeedback?.voiceStatus.orEmpty()}\nГромкость — мультимедиа ТСД. «Набор собран» означает сохранение на ТСД. Подпись и отправка в ЧЗ выполняются на ПК.";setPadding(0,12,0,12)}
+        val voice=CheckBox(this).apply{text="Женский голос при сканировании и в предупреждениях";isChecked=prefs.getBoolean("scan_voice",true)}
+        val note=TextView(this).apply{text="Громкость — мультимедиа ТСД. «Набор собран» означает сохранение на ТСД. Подпись и отправка в ЧЗ выполняются на ПК.";setPadding(0,12,0,12)}
         listOf(sound,voice,note).forEach{layout.addView(it)}
         guardDialog().setTitle("Звук и голос").setView(layout).setNegativeButton("Отмена",null)
             .setPositiveButton("Сохранить"){_,_->attempt{
@@ -451,34 +455,40 @@ class MainActivity:AppCompatActivity() {
         if(pc.url.isBlank()){if(notify)connectDialog();return}
         // A manual transfer from this work page sends only its frozen profile's jobs.
         val toUpload=if(upload)snapshot.jobs.filter{!it.uploaded&&it.status=="LOCAL_READY"&&work.owns(it)}else emptyList()
-        val toRead=snapshot.jobs.filter{it.uploaded&&it.status!="VERIFIED"&&it.status!="CANCELLED_LOCAL"}.take(100)
+        val toRead=statusReads.batch(snapshot.jobs)
         if(toUpload.isEmpty()&&toRead.isEmpty()){if(notify)toast("Нет новых наборов или незавершённых отправок");return}
         networkBusy=true;render()
         scope.launch {
             try {
                 val client=PcClient(pc)
                 for(job in toUpload){
-                    val reply=withContext(Dispatchers.IO){client.upload(job)};applyReply(job,reply)
-                    if(halted)break
+                    if(halted || maintenance)break
+                    val reply=withContext(Dispatchers.IO){client.upload(job)}
+                    if(halted || maintenance || !applyReply(job,reply))break
                 }
-                if(!halted)for(job in toRead){
-                    val reply=withContext(Dispatchers.IO){client.status(job.id)};applyReply(job,reply)
-                    if(halted)break
+                if(halted || maintenance)return@launch
+                val report=statusReads.readBatch(toRead,
+                    read={job->withContext(Dispatchers.IO){client.status(job.id)}},
+                    apply={job,reply->applyReply(job,reply)},shouldStop={halted||maintenance})
+                if(report.stopped)return@launch
+                if(report.blockingFailure!=null){
+                    if(notify && report.checked>0)log("Перед остановкой проверено статусов: ${report.checked}. Сохранённые результаты остаются в очереди.")
+                    throw report.blockingFailure
                 }
-                if(notify)log(if(upload)"Готовые наборы переданы в очередь ПК. Для ЧЗ нужна подпись на ПК." else "Статусы с ПК обновлены")
+                if(notify){
+                    if(upload)log("Передача готовых наборов в очередь ПК завершена. Для ЧЗ нужна подпись на ПК.")
+                    log("Статусы с ПК: проверено ${report.checked}; не удалось проверить ${report.skipped}.")
+                    if(report.skipped>0)toast("Не все статусы обновлены: ${report.skipped}. ${report.firstSkipped?.message.orEmpty()}\nДругие наборы проверены; очередь сохранена.")
+                }
             }catch(e:CancellationException){throw e}
              catch(e:Exception){if(notify){log("Связь с ПК: ${e.message}. Очередь сохранена.");toast("${e.message}\nНаборы не удалены")}}
             finally{networkBusy=false;render()}
         }
     }
-    private fun applyReply(original:Job,reply:Job){
-        require(reply.schemaVersion==original.schemaVersion&&reply.pg==original.pg&&reply.id==original.id&&reply.inn==original.inn&&reply.environment==original.environment&&
-            reply.setCode==original.setCode&&reply.children.toSet()==original.children.toSet()&&reply.children.size==original.children.size&&
-            reply.template==original.template){"ПК вернул другой состав. Ответ не принят"}
-        require(reply.status in setOf("WAITING_SIGNATURE","SUBMITTING","SUBMITTED","PROCESSING","VERIFIED","REJECTED","UNKNOWN","BLOCKED","CHECK_REQUIRED","CANCELLED_LOCAL")){"Неизвестный статус ПК"}
-        val changed=!original.uploaded||original.status!=reply.status||original.detail!=reply.detail||original.documentId!=reply.documentId
-        original.status=reply.status;original.detail=reply.detail;original.documentId=reply.documentId;original.uploaded=true
-        if(changed){persist();render()}
+    private fun applyReply(original:Job,reply:Job):Boolean {
+        val next=PcReplyCommit.apply(snapshot,original,reply){persist(it)} ?: return false
+        if(next!==snapshot){snapshot=next;render()}
+        return true
     }
     private fun connectDialog(){
         pairMode=false;pauseFlow()
@@ -516,6 +526,7 @@ class MainActivity:AppCompatActivity() {
         b.btnStartWork.text=if(editorOpen)"Сохранить и начать работу" else "Начать работу"
         b.btnStartWork.isEnabled=p==null&&!halted&&!maintenance
         b.btnViewQueue.isEnabled=!editorOpen&&!halted
+        b.btnRefreshFromProfiles.isEnabled=!editorOpen&&!halted&&!maintenance&&!networkBusy
         b.btnEditProfile.isEnabled=!locked
         b.btnNewProfile.isEnabled=!locked&&!editorOpen
         b.btnDuplicateProfile.isEnabled=!locked&&!editorOpen
@@ -722,9 +733,9 @@ class MainActivity:AppCompatActivity() {
                 work.leave(snapshot.current);clearScanInput();applyProfile(profiles[selected]);render();b.profilePage.scrollTo(0,0)
             }}.show()
     }
-    private fun guardDialog():AlertDialog.Builder{
+    private fun guardDialog(onDismiss:()->Unit={}):AlertDialog.Builder{
         pauseFlow();dialogDepth++
-        return AlertDialog.Builder(this).setOnDismissListener{dialogDepth=(dialogDepth-1).coerceAtLeast(0);render()}
+        return AlertDialog.Builder(this).setOnDismissListener{dialogDepth=(dialogDepth-1).coerceAtLeast(0);onDismiss();render()}
     }
     private fun canReceive()=work.canReceive(foreground,halted,dialogDepth>0)&&!pairMode&&!maintenance&&SessionAccounting.ready(snapshot)
     private fun canFlow()=work.canTrigger(foreground,halted,dialogDepth>0)&&!pairMode&&!maintenance&&SessionAccounting.ready(snapshot)

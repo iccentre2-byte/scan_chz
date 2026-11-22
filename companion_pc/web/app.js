@@ -5,6 +5,7 @@ if(key)sessionStorage.setItem('chzAdminKey',key);
 history.replaceState(null,'',location.pathname);
 let jobs=[],certs=[],chosen=new Set(),busy=false,pairUrl=null,working=false,view='waiting',refreshing=false,selectionLimit=50;
 let syncGroups=[],syncSupported=false,adminExpired=false,certBusy=false,busyAction=null,activeAction=null;
+let messageSource='action';
 const SIGNABLE=new Set(['WAITING_SIGNATURE','BLOCKED']);
 const CHECKABLE=new Set(['WAITING_SIGNATURE','BLOCKED','SUBMITTED','PROCESSING','CHECK_REQUIRED','UNKNOWN']);
 const VIEW_LABELS={waiting:'Ожидают подписи',processing:'В обработке',processed:'Обработанные',problems:'Проблемы / отменённые'};
@@ -21,17 +22,44 @@ async function api(path,body){
  if(adminExpired)throw Error('Эта панель относится к прежнему запуску. Откройте новую панель по ссылке из окна Start_PC.cmd.');
  const controller=new AbortController();const timeout=path==='/api/certificates'?190000:body===undefined?15000:20000;
  let timer;
- const expired=new Promise((_,reject)=>{timer=setTimeout(()=>{reject(Error(body===undefined?'Помощник не ответил вовремя. Повторите обновление списка.':'Ожидание ответа истекло. Запрос не повторялся; операция могла начаться. Обновите список и проверьте её состояние.'));controller.abort();},timeout);});
+ const expired=new Promise((_,reject)=>{timer=setTimeout(()=>{const error=Error(body===undefined?'Помощник не ответил вовремя. Повторите обновление списка.':'Ожидание ответа истекло. Запрос не повторялся; операция могла начаться. Обновите список и проверьте её состояние.');error.connectionIssue=true;reject(error);controller.abort();},timeout);});
  try{
   return await Promise.race([(async()=>{
    const r=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'X-Admin-Key':key,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',redirect:'error',signal:controller.signal});
    if(r.status===401){adminExpired=true;working=false;busy=false;sessionStorage.removeItem('chzAdminKey');updateActions();throw Error('Помощник перезапущен: откройте новую панель по ссылке из окна Start_PC.cmd. Очередь сохранена.');}
-   let data;try{data=await r.json();}catch(error){throw Error('Помощник вернул неполный или неверный ответ. Обновите список; запрос действия не повторяется.');}
+   let data;try{data=await r.json();}catch(error){const incomplete=Error('Помощник вернул неполный или неверный ответ. Обновите список; запрос действия не повторяется.');incomplete.connectionIssue=true;throw incomplete;}
    if(!r.ok)throw Error(data.error||('HTTP '+r.status));return data;
   })(),expired]);
- }finally{clearTimeout(timer);}
+ }catch(error){if(path==='/api/state'&&(error.connectionIssue||['TypeError','AbortError'].includes(error.name)))error.refreshConnection=true;throw error;}
+ finally{clearTimeout(timer);}
 }
-function message(value,error=false){$('message').textContent=value;$('message').className=error?'error':'';}
+function message(value,error=false,source='action'){messageSource=source;$('message').textContent=value;$('message').className=error?'error':'';}
+function operationText(operation){
+ const o=operation;const stages={login:'Вход по УКЭП: при запросе введите PIN в окне КриптоПро',check:'Проверка статусов и составов',submit:'Подпись и отправка документа'};
+ const states={RUNNING:'выполняется',QUEUED:'ожидает запуска',DONE:'завершено',ERROR:'ошибка'};
+ const active=['RUNNING','QUEUED'].includes(o.state);
+ const hasCounts=Number.isInteger(o.verified)&&Number.isInteger(o.pending);
+ const allVerified=hasCounts&&o.total>0&&o.verified===o.total&&o.pending===0;
+ const counts=hasCounts?`Состав подтверждён: ${o.verified}/${o.total} · ожидают проверки: ${o.pending}${o.rejected?' · отклонены: '+o.rejected:''}`:'';
+ if(o.action==='submit'){
+  const issue=o.verificationError||o.error||'';
+  if(o.documentId){
+   const lines=[`Документ принят ЧЗ: ${o.done}/${o.total} · ${o.documentId}`];
+   if(counts)lines.push(counts);
+   if(active)lines.push('Проверка статуса и состава выполняется.');
+   else if(allVerified)lines.push('Все выбранные наборы подтверждены.');
+   else if(issue)lines.push('Проверка результата не завершена. Документ повторно не отправляйте; используйте проверку статусов.');
+   else lines.push('Текущий результат проверки каждого набора — в его карточке очереди.');
+   if(issue)lines.push(`${allVerified?'Предыдущая ошибка проверки':'Ошибка проверки'}: ${issue}`);
+   return lines.join('\n');
+  }
+  const header=allVerified?'Составы выбранных наборов подтверждены; UUID этой отправки не сохранён.':o.state==='ERROR'?
+   (o.stage==='login'?'Отправка не начата: вход в ЧЗ не завершён.':'Приём документа ЧЗ не подтверждён. Проверьте текущие статусы наборов перед дальнейшими действиями.'):
+   active?`Отправка документа: ${stages[o.stage]||states[o.state]} · наборов: ${o.total}`:`Отправка: ${states[o.state]||o.state} · наборов: ${o.total}`;
+  return [header,counts,issue?`${allVerified?'Предыдущая ошибка':'Ошибка'}: ${issue}`:''].filter(Boolean).join('\n');
+ }
+ return [`Проверка: ${states[o.state]||o.state}, ${o.done}/${o.total}${active&&o.stage?' · '+(stages[o.stage]||o.stage):''}`,counts,o.error?'Ошибка: '+o.error:''].filter(Boolean).join('\n');
+}
 function updateActions(){
  const selected=selectedJobs();const locked=working||busy||adminExpired;
  const canSign=selected.length>0&&selected.every(j=>SIGNABLE.has(j.status)&&!j.documentId);
@@ -148,11 +176,10 @@ async function refresh(){
   syncSupported=Array.isArray(data.syncGroups);syncGroups=data.syncGroups||[];
   selectionLimit=Number.isInteger(data.selectionLimit)&&data.selectionLimit>0&&data.selectionLimit<=500?data.selectionLimit:50;
   $('version').textContent='Версия '+data.version+' · опытная сборка';$('dataDir').textContent=data.dataDir;
-  const stages={login:'Вход по УКЭП: при запросе введите PIN в окне КриптоПро',check:'Проверка статусов и составов',submit:'Подпись и отправка документа'};
-  const states={RUNNING:'выполняется',QUEUED:'ожидает запуска',DONE:'завершено',ERROR:'ошибка'};
-  $('operations').textContent=Object.values(data.operations).map(o=>`${o.action==='submit'?'Отправка':'Проверка'}: ${states[o.state]||o.state}, ${o.done}/${o.total}${['RUNNING','QUEUED'].includes(o.state)&&o.stage?' · '+(stages[o.stage]||o.stage):''}${o.documentId?' · документ '+o.documentId:''}${o.error?' · '+o.error:''}`).join('\n');
+  $('operations').textContent=Object.values(data.operations).map(operationText).join('\n\n');
   const active=Object.values(data.operations).find(o=>['RUNNING','QUEUED'].includes(o.state));
   working=!!active;activeAction=active?(active.action==='submit'?'sign':active.action==='login-check'?'loginCheck':'check'):null;draw();
+  if(messageSource==='refresh')message('',false,'none');
  }catch(error){working=false;activeAction=null;throw error;}finally{refreshing=false;updateActions();}
 }
 async function perform(action){
@@ -174,7 +201,7 @@ async function showQr(){
  const r=await fetch('/api/pair.svg?host='+encodeURIComponent(host),{headers:{'X-Admin-Key':key},cache:'no-store'});
  if(!r.ok)throw Error((await r.json()).error);pairUrl=URL.createObjectURL(await r.blob());$('pairImage').src=pairUrl;
 }
-function run(fn){return async()=>{try{await fn();}catch(e){message(String(e.message||e),true);}};}
+function run(fn){return async()=>{try{await fn();}catch(e){message(String(e.message||e),true,e.refreshConnection?'refresh':'action');}};}
 $('showPair').onclick=run(async()=>{
  const c=await api('/api/connection');$('pairBox').hidden=false;$('hostSelect').replaceChildren();
  for(const h of c.addresses){const option=text('option',h);option.value=h;$('hostSelect').append(option);}

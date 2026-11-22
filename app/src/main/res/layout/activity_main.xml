@@ -14,6 +14,7 @@
                 <TextView android:id="@+id/tvProfileSummary" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Выберите сохранённый профиль" android:textSize="15sp" android:paddingTop="6dp" android:paddingBottom="6dp" />
                 <Button android:id="@+id/btnStartWork" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Начать работу" android:minHeight="48dp" />
                 <Button android:id="@+id/btnViewQueue" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Все наборы и история сессий" android:minHeight="48dp" />
+                <Button android:id="@+id/btnRefreshFromProfiles" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Обновить статусы с ПК" android:minHeight="48dp" />
                 <Button android:id="@+id/btnEditProfile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Настроить профиль" android:minHeight="48dp" />
                 <Button android:id="@+id/btnNewProfile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Создать новый профиль" android:minHeight="48dp" />
                 <Button android:id="@+id/btnDuplicateProfile" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Создать копию выбранного профиля" android:minHeight="48dp" />
