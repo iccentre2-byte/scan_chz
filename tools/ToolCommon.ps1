@@ -31,7 +31,7 @@ function Get-ChzAdb {
     if(!(Test-Path -LiteralPath $adb)) {
         $found=Get-Command adb.exe -ErrorAction SilentlyContinue
         if($found){return $found.Source}
-        throw 'Bundled ADB not found. Extract the complete CHZ-1.3.5-Windows-Safe.zip first.'
+        throw 'Bundled ADB not found. Extract the complete CHZ-1.3.6-Windows-Safe.zip first.'
     }
     return $adb
 }

@@ -5,7 +5,7 @@ internal data class WorkScreenColors(val background:Int,val foreground:Int)
 
 /** Presentation only: saved queue/session state survives activity pauses and restarts without new storage keys. */
 internal class WorkScreenFeedback {
-    companion object {const val FLASH_MS=550L}
+    companion object {const val FLASH_MS=1400L}
     private var duplicateUntil=Long.MIN_VALUE
     private var completedJobHint:String?=null
 
@@ -26,15 +26,17 @@ internal class WorkScreenFeedback {
     fun colors(state:WorkScreenState,night:Boolean):WorkScreenColors {
         val background=if(night)when(state){
             WorkScreenState.NEUTRAL->0xff202124
-            WorkScreenState.FILLING->0xff4a3e15
-            WorkScreenState.COMPLETE->0xff183f2a
-            WorkScreenState.DUPLICATE->0xff61232a
+            WorkScreenState.FILLING->0xffffba00
+            WorkScreenState.COMPLETE->0xff42c86f
+            WorkScreenState.DUPLICATE->0xffb71c1c
         }else when(state){
             WorkScreenState.NEUTRAL->0xfff5f5f5
-            WorkScreenState.FILLING->0xfffff2b3
-            WorkScreenState.COMPLETE->0xffdff2e2
-            WorkScreenState.DUPLICATE->0xffffd9d9
+            WorkScreenState.FILLING->0xffffd527
+            WorkScreenState.COMPLETE->0xff64df85
+            WorkScreenState.DUPLICATE->0xffd32020
         }
-        return WorkScreenColors(background.toInt(),if(night)0xfff5f5f5.toInt()else 0xff202124.toInt())
+        val foreground=if(state==WorkScreenState.DUPLICATE || state==WorkScreenState.NEUTRAL && night)
+            0xffffffff else 0xff202124
+        return WorkScreenColors(background.toInt(),foreground.toInt())
     }
 }
