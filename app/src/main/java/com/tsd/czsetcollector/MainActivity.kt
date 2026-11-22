@@ -1,6 +1,7 @@
 package com.tsd.czsetcollector
 
 import android.content.*
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -54,6 +55,9 @@ class MainActivity:AppCompatActivity() {
     private var scanFeedback:ScanFeedback?=null
     private var scanResult=""
     private var scanResultError=false
+    private var lastScanSignal:ScanSignal?=null
+    private val workScreen=WorkScreenFeedback()
+    private val endDuplicateFlash=Runnable{workScreen.clearFlash();render()}
     private var queueView=QueueView.CURRENT
     private var historySession:String?=null
     private var historyOptions=emptyList<SessionOption>()
@@ -166,6 +170,7 @@ class MainActivity:AppCompatActivity() {
         mainHandler.postDelayed(poll,10000)
     }
     override fun onPause(){
+        workScreen.clearFlash();mainHandler.removeCallbacks(endDuplicateFlash)
         foreground=false;mainHandler.removeCallbacks(poll);pairMode=false;pauseFlow();clearScanInput()
         scanFeedback?.pause()
         try{unregisterReceiver(receiver)}catch(e:Exception){};super.onPause()
@@ -285,7 +290,7 @@ class MainActivity:AppCompatActivity() {
             val j=snapshot.current?:return@setOnClickListener
             guardDialog(onDismiss={scanFeedback?.stopSpeech()}).setTitle("Сбросить текущий набор?")
                 .setMessage("Сканирование этого набора придётся начать заново. Будет удалён код набора и все его отсканированные пачки (${j.children.size}).")
-                .setNegativeButton("Продолжить сборку",null).setPositiveButton("Сбросить набор"){_,_->
+                .setNegativeButton("Оставить набор",null).setPositiveButton("Сбросить набор"){_,_->
                     val next=SessionAccounting.discardCurrent(snapshot)
                     if(persist(next)){snapshot=next;pauseFlow();clearScanInput();showScanResult("Незавершённый набор сброшен. Готово к следующему набору.")}
                 }.show()
@@ -380,8 +385,15 @@ class MainActivity:AppCompatActivity() {
             val result=CollectionScan.accept(snapshot,profile,code){next->persist(next)}
             if(result==null){showScanResult("Код не принят: ошибка сохранения.",true);return}
             snapshot=result.snapshot
+            mainHandler.removeCallbacks(endDuplicateFlash)
+            workScreen.clearFlash()
+            if(result.signal==ScanSignal.COMPLETED)workScreen.savedCompletion(snapshot)
+            if(result.signal==ScanSignal.DUPLICATE){
+                workScreen.duplicate(SystemClock.elapsedRealtime())
+                mainHandler.postDelayed(endDuplicateFlash,WorkScreenFeedback.FLASH_MS)
+            }
             if(!SessionAccounting.ready(snapshot))pauseFlow()
-            showScanResult(result.message,result.signal==ScanSignal.DUPLICATE)
+            showScanResult(result.message,result.signal==ScanSignal.DUPLICATE,result.signal)
             result.signal?.let{signal->
                 scanFeedback?.play(signal)
                 log(result.message)
@@ -395,6 +407,7 @@ class MainActivity:AppCompatActivity() {
         val next=SessionAccounting.begin(snapshot,profile,System.currentTimeMillis())
         if(!persist(next))return false
         snapshot=next
+        workScreen.newSession();mainHandler.removeCallbacks(endDuplicateFlash);lastScanSignal=null
         // The ledger contains the frozen profile and is the authoritative restart record.
         if(!prefs.edit().putString("work_session_profile",gson.toJson(profile)).commit())log("Профиль сессии сохранён с очередью; отдельный кэш профиля не записан.")
         queueView=QueueView.CURRENT;b.spinnerQueueView.setSelection(queueView.ordinal)
@@ -402,7 +415,7 @@ class MainActivity:AppCompatActivity() {
         scanResult="Новая сессия начата. Сканируйте код набора.";scanResultError=false
         return true
     }
-    private fun showScanResult(message:String,error:Boolean=false){scanResult=message;scanResultError=error;render()}
+    private fun showScanResult(message:String,error:Boolean=false,signal:ScanSignal?=null){scanResult=message;scanResultError=error;lastScanSignal=signal;render()}
     private fun feedbackSettings(){
         val layout=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(24,12,24,12)}
         val sound=CheckBox(this).apply{text="Короткие звуковые сигналы";isChecked=prefs.getBoolean("scan_sound",true)}
@@ -515,12 +528,23 @@ class MainActivity:AppCompatActivity() {
         b.btnResumeAfterUpdate.visibility=if(maintenance)View.VISIBLE else View.GONE
         val j=snapshot.current;val p=work.profile;val locked=p!=null||j!=null||halted
         val sessionReady=SessionAccounting.ready(snapshot)
+        val screenState=if(p==null)WorkScreenState.NEUTRAL else workScreen.visibleState(snapshot,SystemClock.elapsedRealtime())
+        val night=(resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK)==Configuration.UI_MODE_NIGHT_YES
+        val colors=workScreen.colors(screenState,night)
+        b.root.setBackgroundColor(colors.background);b.workPage.setBackgroundColor(colors.background)
+        listOf(b.tvWorkProfile,b.tvWorkSession,b.tvScanState,b.tvFlowState,b.tvScanHeader,b.tvCurrentSet,b.tvProgress,
+            b.tvQueueHeader,b.tvQueueSelection,b.tvTotalCompletedSets,b.tvNoSignature,b.tvQueue,b.tvLog).forEach{it.setTextColor(colors.foreground)}
         b.profilePage.visibility=if(p==null)View.VISIBLE else View.GONE
         b.workPage.visibility=if(p!=null)View.VISIBLE else View.GONE
         b.tvScanResult.visibility=if(p!=null)View.VISIBLE else View.GONE
-        b.tvScanResult.text=if(halted)"Сканирование остановлено: ошибка сохранения." else if(p!=null&&!sessionReady)"Нажмите «Начать новую сессию»." else scanResult.ifBlank{if(j==null)"Готово к сканированию набора." else "Набор открыт. Продолжайте сканировать пачки."}
-        b.tvScanResult.setTextColor(android.graphics.Color.BLACK)
-        b.tvScanResult.setBackgroundColor(if(scanResultError||halted)0xffffe0b2.toInt()else 0xffe8f5e9.toInt())
+        b.tvScanResult.text=if(halted)"Сканирование остановлено: ошибка сохранения." else if(p!=null&&!sessionReady)"Нажмите «Начать новую сессию»." else scanResult.ifBlank{
+            if(j!=null)"Набор открыт. Продолжайте сканировать пачки."
+            else if(workScreen.savedState(snapshot)==WorkScreenState.COMPLETE)"Набор собран и сохранён на ТСД. Можно сканировать следующий."
+            else "Готово к сканированию набора."
+        }
+        b.tvScanResult.setTextColor(colors.foreground)
+        b.tvScanResult.setBackgroundColor(if(halted || scanResultError&&lastScanSignal!=ScanSignal.DUPLICATE)
+            workScreen.colors(WorkScreenState.DUPLICATE,night).background else colors.background)
         b.profileEditor.visibility=if(editorOpen)View.VISIBLE else View.GONE
         b.btnEditProfile.text=if(editorOpen)"Закрыть настройки без сохранения" else "Настроить профиль"
         b.btnStartWork.text=if(editorOpen)"Сохранить и начать работу" else "Начать работу"
