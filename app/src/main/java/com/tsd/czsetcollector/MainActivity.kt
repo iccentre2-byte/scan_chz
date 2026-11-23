@@ -16,10 +16,14 @@ import android.text.method.ScrollingMovementMethod
 import android.util.Base64
 import android.util.AtomicFile
 import android.view.View
+import android.view.WindowManager
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import com.google.gson.Gson
 import com.tsd.czsetcollector.databinding.ActivityMainBinding
 import kotlinx.coroutines.*
@@ -147,6 +151,12 @@ class MainActivity:AppCompatActivity() {
     }
     override fun onCreate(savedInstanceState:Bundle?) {
         super.onCreate(savedInstanceState);b=ActivityMainBinding.inflate(layoutInflater);setContentView(b.root)
+        ViewCompat.setOnApplyWindowInsetsListener(b.root){view,insets->
+            if(insets.isVisible(WindowInsetsCompat.Type.ime()) && workKeyboardCanHide()){
+                view.post{hideWorkKeyboard()}
+            }
+            insets
+        }
         maintenance=intent?.getBooleanExtra("chz_maintenance",false)==true
         prefs=getSharedPreferences("cz_multi_profiles",Context.MODE_PRIVATE);store=QueueStore(filesDir);profileStore=ProfileStore(prefs,filesDir)
         scanFeedback=ScanFeedback(this,prefs.getBoolean("scan_sound",true),prefs.getBoolean("scan_voice",true),savedScanVoice())
@@ -198,7 +208,9 @@ class MainActivity:AppCompatActivity() {
     }
     override fun onWindowFocusChanged(hasFocus:Boolean){
         super.onWindowFocusChanged(hasFocus)
-        if(!hasFocus && ::b.isInitialized && work.streaming)pauseFlow()
+        if(!::b.isInitialized)return
+        if(hasFocus)b.root.post{hideWorkKeyboard()}
+        else if(work.streaming)pauseFlow()
     }
     override fun onDestroy(){scanFeedback?.pause();scope.cancel();mainHandler.removeCallbacksAndMessages(null);super.onDestroy()}
     private fun listeners(){
@@ -337,6 +349,7 @@ class MainActivity:AppCompatActivity() {
                 .setPositiveButton("Понятно",null).show()
         }
         b.etScanInput.showSoftInputOnFocus=false
+        b.etScanInput.setOnFocusChangeListener{view,focused->if(focused)view.post{hideWorkKeyboard()}}
         b.etScanInput.setOnEditorActionListener{_,_,_->consumeKeyboardScan();true}
         b.etScanInput.addTextChangedListener(object:TextWatcher{
             override fun beforeTextChanged(s:CharSequence?,start:Int,count:Int,after:Int){}
@@ -399,6 +412,7 @@ class MainActivity:AppCompatActivity() {
         };return}
         if(Codes.withoutPrefix(raw).startsWith("CZPAIR1:")){toast("Сначала нажмите «Подключить ПК» → «Сканировать QR»");return}
         if(!canReceive())return
+        hideWorkKeyboard()
         mainHandler.removeCallbacks(scanPulse);mainHandler.removeCallbacks(restartScan)
         if(work.streaming)stopSoftwareScanTrigger()
         try {
@@ -602,6 +616,10 @@ class MainActivity:AppCompatActivity() {
     private fun render(){
         b.btnResumeAfterUpdate.visibility=if(maintenance)View.VISIBLE else View.GONE
         val j=snapshot.current;val p=work.profile;val locked=p!=null||j!=null||halted
+        val softInputState=if(p!=null) WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
+            else WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
+        val softInputMode=WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or softInputState
+        if(window.attributes.softInputMode!=softInputMode)window.setSoftInputMode(softInputMode)
         val sessionReady=SessionAccounting.ready(snapshot)
         val screenState=if(p==null)WorkScreenState.NEUTRAL else workScreen.visibleState(snapshot,SystemClock.elapsedRealtime())
         val night=(resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK)==Configuration.UI_MODE_NIGHT_YES
@@ -876,6 +894,17 @@ class MainActivity:AppCompatActivity() {
     }
     private fun hideKeyboard(){
         (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)?.hideSoftInputFromWindow(b.root.windowToken,0)
+    }
+
+    private fun workKeyboardCanHide() = ::b.isInitialized && work.profile!=null && !editorOpen &&
+        dialogDepth==0 && hasWindowFocus()
+
+    private fun hideWorkKeyboard(){
+        if(!workKeyboardCanHide())return
+        if(ViewCompat.getRootWindowInsets(b.root)?.isVisible(WindowInsetsCompat.Type.ime())==true){
+            WindowCompat.getInsetsController(window,b.root).hide(WindowInsetsCompat.Type.ime())
+        }
+        hideKeyboard()
     }
 
     private fun startSoftwareScanTrigger() {
